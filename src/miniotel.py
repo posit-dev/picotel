@@ -21,6 +21,7 @@ License: MIT
 
 from __future__ import annotations
 
+import base64
 import os
 import time
 from dataclasses import dataclass, field
@@ -161,3 +162,133 @@ class LogRecord:
     severity_number: int = Severity.INFO
     severity_text: str = ""
     attributes: dict[str, Any] = field(default_factory=dict)
+
+
+def _to_otlp_value(value: Any) -> dict[str, Any]:  # noqa: ANN401, PLR0911
+    """Convert a Python value to the typed OTLP attribute format.
+
+    Returns a dict with a single key indicating the type and the value.
+
+    Examples:
+        "hello" -> {"stringValue": "hello"}
+        42 -> {"intValue": "42"}
+        True -> {"boolValue": True}
+        3.14 -> {"doubleValue": 3.14}
+        None -> {}
+
+    """
+    if value is None:
+        return {}
+    # Check bool before int since bool is a subclass of int
+    if isinstance(value, bool):
+        return {"boolValue": value}
+    if isinstance(value, int):
+        # Store as string to avoid JSON precision loss for large integers
+        return {"intValue": str(value)}
+    if isinstance(value, float):
+        return {"doubleValue": value}
+    if isinstance(value, str):
+        return {"stringValue": value}
+    if isinstance(value, bytes):
+        return {"bytesValue": base64.b64encode(value).decode()}
+    if isinstance(value, list):
+        return {"arrayValue": {"values": [_to_otlp_value(x) for x in value]}}
+    if isinstance(value, dict):
+        return {
+            "kvlistValue": {
+                "values": [
+                    {"key": k, "value": _to_otlp_value(v)} for k, v in value.items()
+                ]
+            }
+        }
+    # Fallback to string representation for unknown types
+    return {"stringValue": str(value)}
+
+
+def _attributes_to_otlp(attributes: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return an OTLP attribute list from a Python dict.
+
+    Converts each key-value pair to {"key": "...", "value": {...}} format,
+    where value is converted using _to_otlp_value(). Skips None values.
+
+    :param attributes: Dictionary of attribute key-value pairs
+
+    Examples::
+
+        {"foo": "bar", "count": 5} -> [
+            {"key": "foo", "value": {"stringValue": "bar"}},
+            {"key": "count", "value": {"intValue": "5"}}
+        ]
+        {"a": None} -> []  # None values are skipped
+
+    """
+    return [
+        {"key": k, "value": _to_otlp_value(v)}
+        for k, v in attributes.items()
+        if v is not None
+    ]
+
+
+def _span_to_dict(span: Span) -> dict[str, Any]:
+    """Return the OTLP JSON dict representation of a Span.
+
+    Builds a span dict following the OpenTelemetry Protocol specification.
+    Optional fields are omitted when empty to minimize payload size.
+
+    :param span: The Span object to serialize
+
+    """
+    # Required fields - always present
+    result = {
+        "traceId": span.trace_id,
+        "spanId": span.span_id,
+        "name": span.name,
+        "kind": int(span.kind),
+        "startTimeUnixNano": str(span.start_time_ns),
+        "endTimeUnixNano": str(span.end_time_ns),
+    }
+
+    # Optional fields - omit if empty/default
+    if span.parent_span_id:
+        result["parentSpanId"] = span.parent_span_id
+
+    attrs = _attributes_to_otlp(span.attributes)
+    if attrs:
+        result["attributes"] = attrs
+
+    if span.events:
+        result["events"] = [
+            {
+                "name": event.name,
+                "timeUnixNano": str(event.timestamp_ns),
+                **(
+                    {"attributes": _attributes_to_otlp(event.attributes)}
+                    if event.attributes
+                    else {}
+                ),
+            }
+            for event in span.events
+        ]
+
+    if span.links:
+        result["links"] = [
+            {
+                "traceId": link.trace_id,
+                "spanId": link.span_id,
+                **(
+                    {"attributes": _attributes_to_otlp(link.attributes)}
+                    if link.attributes
+                    else {}
+                ),
+            }
+            for link in span.links
+        ]
+
+    # Include status only if it's not UNSET or has a message
+    if span.status and (span.status.code != StatusCode.UNSET or span.status.message):
+        result["status"] = {
+            "code": int(span.status.code),
+            "message": span.status.message,
+        }
+
+    return result
