@@ -97,8 +97,7 @@ def test_logrecord_with_trace_correlation():
 def test_logrecord_severity_defaults():
     """LogRecord defaults to INFO severity with empty severity_text."""
     log = LogRecord("test message")
-    assert log.severity_number == 9  # Severity.INFO value
-    assert log.severity_number == Severity.INFO
+    assert log.severity_number == Severity.INFO  # Check against enum directly
     assert log.severity_text == ""
 
 
