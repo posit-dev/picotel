@@ -95,3 +95,69 @@ class InstrumentationScope:
     name: str
     version: str = ""
     attributes: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Event:
+    """An event represents a notable occurrence during a span's lifetime."""
+
+    name: str
+    timestamp_ns: int
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Link:
+    """A link associates a span with another span in the same or different trace."""
+
+    trace_id: str
+    span_id: str
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SpanStatus:
+    """The status of a completed span indicating success or error."""
+
+    code: StatusCode = StatusCode.UNSET
+    message: str = ""
+
+
+@dataclass
+class Span:
+    """A span represents a single operation within a trace.
+
+    Spans can be nested to form a tree structure representing the call hierarchy.
+    A root span has no parent_span_id; child spans reference their parent.
+    """
+
+    trace_id: str
+    span_id: str
+    name: str
+    start_time_ns: int
+    end_time_ns: int
+    parent_span_id: str = ""
+    kind: SpanKind = SpanKind.INTERNAL
+    attributes: dict[str, Any] = field(default_factory=dict)
+    events: list[Event] = field(default_factory=list)
+    links: list[Link] = field(default_factory=list)
+    status: SpanStatus | None = None
+
+
+@dataclass
+class LogRecord:
+    """A log record represents a single log entry with optional trace correlation.
+
+    Logs can be correlated with traces by setting trace_id and span_id.
+    Timestamps default to 0, which means "use current time when sending".
+    """
+
+    body: Any
+    timestamp_ns: int = 0
+    observed_timestamp_ns: int = 0
+    trace_id: str = ""
+    span_id: str = ""
+    trace_flags: int = 0
+    severity_number: int = Severity.INFO
+    severity_text: str = ""
+    attributes: dict[str, Any] = field(default_factory=dict)
