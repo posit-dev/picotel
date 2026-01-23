@@ -74,7 +74,11 @@ def new_span_id() -> str:
 
 
 def now_ns() -> int:
-    """Return the current time in nanoseconds since Unix epoch."""
+    """Return the current time in nanoseconds since Unix epoch.
+
+    It should be preferred over time.time() for higher precision timestamps.
+    Otherwise equivalent to int(time.time() * 1_000_000_000).
+    """
     return time.time_ns()
 
 
@@ -148,6 +152,16 @@ class Span:
     links: list[Link] = field(default_factory=list)
     status: SpanStatus | None = None
 
+    def send(
+        self,
+        endpoint: str,
+        resource: Resource,
+        scope: InstrumentationScope | None = None,
+        timeout: float = 10.0,
+    ) -> bool:
+        """Send this span to an OTLP collector over HTTP."""
+        return send_spans(endpoint, resource, [self], scope, timeout)
+
 
 @dataclass
 class LogRecord:
@@ -166,6 +180,211 @@ class LogRecord:
     severity_number: int = Severity.INFO
     severity_text: str = ""
     attributes: dict[str, Any] = field(default_factory=dict)
+
+    def send(
+        self,
+        endpoint: str,
+        resource: Resource,
+        scope: InstrumentationScope | None = None,
+        timeout: float = 10.0,
+    ) -> bool:
+        """Send this log record to an OTLP collector over HTTP."""
+        return send_logs(endpoint, resource, [self], scope, timeout)
+
+
+# -----------------------------------------------------------------------------
+# Public API
+# -----------------------------------------------------------------------------
+
+
+def send_spans(
+    endpoint: str,
+    resource: Resource,
+    spans: list[Span],
+    scope: InstrumentationScope | None = None,
+    timeout: float = 10.0,
+) -> bool:
+    """Send a batch of spans to an OTLP collector over HTTP.
+
+    Sends spans to the collector's /v1/traces endpoint using the OTLP JSON format.
+    Returns True on successful transmission (HTTP 200), False on any error.
+    Errors are logged as warnings but not raised to avoid disrupting the application.
+
+    :param str endpoint: Base URL of the OTLP collector (e.g., "http://localhost:4318")
+    :param Resource resource: Resource attributes describing the service
+    :param list[Span] spans: List of spans to send
+    :param InstrumentationScope scope: Optional instrumentation scope metadata
+    :param float timeout: HTTP request timeout in seconds (default 10.0)
+
+    Example tracing an HTTP request with a database query::
+
+        resource = Resource({
+            "service.name": "order-service",
+            "service.version": "2.1.0",
+        })
+        trace_id = new_trace_id()
+        start = now_ns()
+
+        # Parent span for the HTTP request
+        http_span = Span(
+            trace_id=trace_id,
+            span_id=new_span_id(),
+            name="POST /api/orders",
+            start_time_ns=start,
+            end_time_ns=now_ns(),
+            kind=SpanKind.SERVER,
+            attributes={
+                "http.method": "POST",
+                "http.route": "/api/orders",
+                "http.status_code": 201,
+            },
+            status=SpanStatus(StatusCode.OK),
+        )
+
+        # Child span for the database insert
+        db_span = Span(
+            trace_id=trace_id,
+            span_id=new_span_id(),
+            parent_span_id=http_span.span_id,
+            name="INSERT orders",
+            start_time_ns=start,
+            end_time_ns=now_ns(),
+            kind=SpanKind.CLIENT,
+            attributes={
+                "db.system": "postgresql",
+                "db.operation": "INSERT",
+                "db.name": "shop",
+            },
+        )
+
+        send_spans("http://localhost:4318", resource, [http_span, db_span])
+
+    """
+    # Build the ExportTraceServiceRequest payload
+    # Build scope dict separately for clarity
+    scope_span_dict: dict[str, Any] = {"spans": [_span_to_dict(span) for span in spans]}
+    if scope:
+        scope_dict: dict[str, Any] = {"name": scope.name, "version": scope.version}
+        if scope.attributes:
+            scope_dict["attributes"] = _attributes_to_otlp(scope.attributes)
+        scope_span_dict["scope"] = scope_dict
+
+    payload = {
+        "resourceSpans": [
+            {
+                "resource": {"attributes": _attributes_to_otlp(resource.attributes)},
+                "scopeSpans": [scope_span_dict],
+            }
+        ]
+    }
+
+    # Prepare the HTTP request
+    url = endpoint.rstrip("/") + "/v1/traces"
+    headers = {"Content-Type": "application/json"}
+    data = json.dumps(payload).encode("utf-8")
+
+    try:
+        # urllib is safe here - we're connecting to user-specified telemetry endpoints
+        request = urllib.request.Request(  # noqa: S310
+            url, data=data, headers=headers, method="POST"
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+            # OTLP spec defines only 200 as successful export
+            return response.status == 200  # noqa: PLR2004
+    except (urllib.error.URLError, OSError) as e:
+        # Log the error but don't raise - telemetry shouldn't crash the app
+        logging.warning(f"Failed to send spans to {url}: {e}")
+        return False
+
+
+def send_logs(
+    endpoint: str,
+    resource: Resource,
+    logs: list[LogRecord],
+    scope: InstrumentationScope | None = None,
+    timeout: float = 10.0,
+) -> bool:
+    """Send a batch of logs to an OTLP collector over HTTP.
+
+    Sends logs to the collector's /v1/logs endpoint using the OTLP JSON format.
+    Returns True on successful transmission (HTTP 200), False on any error.
+    Errors are logged as warnings but not raised to avoid disrupting the application.
+
+    :param str endpoint: Base URL of the OTLP collector (e.g., "http://localhost:4318")
+    :param Resource resource: Resource attributes describing the service
+    :param list[LogRecord] logs: List of log records to send
+    :param InstrumentationScope scope: Optional instrumentation scope metadata
+    :param float timeout: HTTP request timeout in seconds (default 10.0)
+
+    Example logging a payment processing error with trace correlation::
+
+        resource = Resource({
+            "service.name": "payment-service",
+            "deployment.environment": "prod",
+        })
+
+        # These would come from an active span context
+        trace_id = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+        span_id = "1234567890abcdef"
+
+        error_log = LogRecord(
+            body="Payment declined: insufficient funds",
+            severity_number=Severity.ERROR,
+            severity_text="ERROR",
+            trace_id=trace_id,
+            span_id=span_id,
+            attributes={
+                "payment.provider": "stripe",
+                "payment.amount": 99.99,
+                "payment.currency": "USD",
+                "error.type": "InsufficientFundsError",
+                "customer.id": "cust_12345",
+            },
+        )
+
+        send_logs("http://localhost:4318", resource, [error_log])
+
+    """
+    # Build the ExportLogsServiceRequest payload
+    # Build scope dict separately for clarity
+    scope_log_dict: dict[str, Any] = {"logRecords": [_log_to_dict(log) for log in logs]}
+    if scope:
+        scope_dict: dict[str, Any] = {"name": scope.name, "version": scope.version}
+        if scope.attributes:
+            scope_dict["attributes"] = _attributes_to_otlp(scope.attributes)
+        scope_log_dict["scope"] = scope_dict
+
+    payload = {
+        "resourceLogs": [
+            {
+                "resource": {"attributes": _attributes_to_otlp(resource.attributes)},
+                "scopeLogs": [scope_log_dict],
+            }
+        ]
+    }
+
+    # Prepare the HTTP request
+    url = endpoint.rstrip("/") + "/v1/logs"
+    headers = {"Content-Type": "application/json"}
+    data = json.dumps(payload).encode("utf-8")
+
+    try:
+        # urllib is safe here - we're connecting to user-specified telemetry endpoints
+        request = urllib.request.Request(  # noqa: S310
+            url, data=data, headers=headers, method="POST"
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+            # OTLP spec defines only 200 as successful export
+            return response.status == 200  # noqa: PLR2004
+    except (urllib.error.URLError, OSError) as e:
+        # Log the error but don't raise - telemetry shouldn't crash the app
+        logging.warning(f"Failed to send logs to {url}: {e}")
+        return False
+
+
+# -----------------------------------------------------------------------------
+# Internal helpers
+# -----------------------------------------------------------------------------
 
 
 def _to_otlp_value(value: Any) -> dict[str, Any]:  # noqa: ANN401, PLR0911
@@ -243,7 +462,7 @@ def _span_to_dict(span: Span) -> dict[str, Any]:
 
     """
     # Required fields - always present
-    result = {
+    result: dict[str, Any] = {
         "traceId": span.trace_id,
         "spanId": span.span_id,
         "name": span.name,
@@ -298,57 +517,40 @@ def _span_to_dict(span: Span) -> dict[str, Any]:
     return result
 
 
-def send_spans(
-    endpoint: str,
-    resource: Resource,
-    spans: list[Span],
-    scope: InstrumentationScope | None = None,
-    timeout: float = 10.0,
-) -> bool:
-    """Send a batch of spans to an OTLP collector over HTTP.
+def _log_to_dict(log: LogRecord) -> dict[str, Any]:
+    """Return the OTLP JSON dict representation of a LogRecord.
 
-    Sends spans to the collector's /v1/traces endpoint using the OTLP JSON format.
-    Returns True on successful transmission (HTTP 200), False on any error.
-    Errors are logged as warnings but not raised to avoid disrupting the application.
+    Builds a log record dict following the OpenTelemetry Protocol specification.
+    Uses current time for timestamps if they are 0. Optional fields are omitted
+    when empty to minimize payload size.
 
-    :param str endpoint: Base URL of the OTLP collector (e.g., "http://localhost:4318")
-    :param Resource resource: Resource attributes describing the service
-    :param list[Span] spans: List of spans to send
-    :param InstrumentationScope scope: Optional instrumentation scope metadata
-    :param float timeout: HTTP request timeout in seconds (default 10.0)
+    :param log: The LogRecord object to serialize
     """
-    # Build the ExportTraceServiceRequest payload
-    # Build scope dict separately for clarity
-    scope_span_dict = {"spans": [_span_to_dict(span) for span in spans]}
-    if scope:
-        scope_dict = {"name": scope.name, "version": scope.version}
-        if scope.attributes:
-            scope_dict["attributes"] = _attributes_to_otlp(scope.attributes)
-        scope_span_dict["scope"] = scope_dict
-
-    payload = {
-        "resourceSpans": [
-            {
-                "resource": {"attributes": _attributes_to_otlp(resource.attributes)},
-                "scopeSpans": [scope_span_dict],
-            }
-        ]
+    # Use current time if timestamps are 0
+    result: dict[str, Any] = {
+        "timeUnixNano": str(log.timestamp_ns if log.timestamp_ns else now_ns()),
+        "observedTimeUnixNano": str(
+            log.observed_timestamp_ns if log.observed_timestamp_ns else now_ns()
+        ),
+        "severityNumber": log.severity_number,
+        "body": _to_otlp_value(log.body),
     }
 
-    # Prepare the HTTP request
-    url = endpoint.rstrip("/") + "/v1/traces"
-    headers = {"Content-Type": "application/json"}
-    data = json.dumps(payload).encode("utf-8")
+    # Optional fields - omit if empty/default
+    if log.severity_text:
+        result["severityText"] = log.severity_text
 
-    try:
-        # urllib is safe here - we're connecting to user-specified telemetry endpoints
-        request = urllib.request.Request(  # noqa: S310
-            url, data=data, headers=headers, method="POST"
-        )
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-            # OTLP spec defines only 200 as successful export
-            return response.status == 200  # noqa: PLR2004
-    except (urllib.error.URLError, OSError) as e:
-        # Log the error but don't raise - telemetry shouldn't crash the app
-        logging.warning(f"Failed to send spans to {url}: {e}")
-        return False
+    attrs = _attributes_to_otlp(log.attributes)
+    if attrs:
+        result["attributes"] = attrs
+
+    if log.trace_id:
+        result["traceId"] = log.trace_id
+
+    if log.span_id:
+        result["spanId"] = log.span_id
+
+    if log.trace_flags:
+        result["flags"] = log.trace_flags
+
+    return result
