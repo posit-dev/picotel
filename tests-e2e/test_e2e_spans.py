@@ -11,13 +11,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from conftest import read_collector_output
 
 from miniotel import (
-    Event,
     InstrumentationScope,
     Resource,
     Span,
-    SpanKind,
-    SpanStatus,
-    StatusCode,
     new_span_id,
     new_trace_id,
     now_ns,
@@ -38,7 +34,7 @@ def test_send_single_span(collector):
         name="test-span",
         start_time_ns=start,
         end_time_ns=start + 1_000_000,
-        kind=SpanKind.INTERNAL,
+        kind=Span.Kind.INTERNAL,
     )
 
     result = send_spans(collector["endpoint"], resource, [span])
@@ -109,12 +105,12 @@ def test_send_span_with_events(collector):
         start_time_ns=start,
         end_time_ns=start + 2_000_000,
         events=[
-            Event(
+            Span.Event(
                 name="cache.miss",
                 timestamp_ns=start + 500_000,
                 attributes={"cache.key": "user:123"},
             ),
-            Event(
+            Span.Event(
                 name="db.query",
                 timestamp_ns=start + 1_000_000,
                 attributes={"db.statement": "SELECT * FROM users"},
@@ -204,7 +200,7 @@ def test_send_span_with_status(collector):
         name="error-span",
         start_time_ns=start,
         end_time_ns=start + 1_000_000,
-        status=SpanStatus(code=StatusCode.ERROR, message="Something went wrong"),
+        status=Span.Status.ERROR,
     )
 
     result = send_spans(collector["endpoint"], resource, [span])
@@ -215,7 +211,6 @@ def test_send_span_with_status(collector):
 
     assert "status" in spans[0]
     assert spans[0]["status"]["code"] == 2  # ERROR
-    assert spans[0]["status"]["message"] == "Something went wrong"
 
 
 def test_send_span_with_parent(collector):
@@ -232,7 +227,7 @@ def test_send_span_with_parent(collector):
         name="parent-span",
         start_time_ns=start,
         end_time_ns=start + 2_000_000,
-        kind=SpanKind.SERVER,
+        kind=Span.Kind.SERVER,
     )
 
     child_span = Span(
@@ -242,7 +237,7 @@ def test_send_span_with_parent(collector):
         name="child-span",
         start_time_ns=start + 500_000,
         end_time_ns=start + 1_500_000,
-        kind=SpanKind.INTERNAL,
+        kind=Span.Kind.INTERNAL,
     )
 
     result = send_spans(collector["endpoint"], resource, [parent_span, child_span])

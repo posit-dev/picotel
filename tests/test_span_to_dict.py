@@ -3,12 +3,7 @@
 import json
 
 from miniotel import (
-    Event,
-    Link,
     Span,
-    SpanKind,
-    SpanStatus,
-    StatusCode,
     _span_to_dict,
     new_span_id,
     new_trace_id,
@@ -62,7 +57,7 @@ def test_span_with_parent_and_attributes():
         span_id=span_id,
         parent_span_id=parent_span_id,
         name="child_operation",
-        kind=SpanKind.CLIENT,
+        kind=Span.Kind.CLIENT,
         start_time_ns=start_time,
         end_time_ns=end_time,
         attributes={"http.method": "GET", "http.status_code": 200, "user.id": 12345},
@@ -98,12 +93,12 @@ def test_span_with_events():
         start_time_ns=start_time,
         end_time_ns=end_time,
         events=[
-            Event(
+            Span.Event(
                 name="request_started",
                 timestamp_ns=event_time1,
                 attributes={"url": "https://example.com"},
             ),
-            Event(
+            Span.Event(
                 name="request_completed",
                 timestamp_ns=event_time2,
                 attributes={"response_size": 1024},
@@ -153,7 +148,7 @@ def test_span_with_links():
         start_time_ns=start_time,
         end_time_ns=end_time,
         links=[
-            Link(
+            Span.Link(
                 trace_id=linked_trace_id,
                 span_id=linked_span_id,
                 attributes={"link.type": "parent_trace"},
@@ -189,14 +184,13 @@ def test_span_with_error_status():
         name="failed_operation",
         start_time_ns=start_time,
         end_time_ns=end_time,
-        status=SpanStatus(code=StatusCode.ERROR, message="Connection timeout"),
+        status=Span.Status.ERROR,
     )
 
     result = _span_to_dict(span)
 
     assert "status" in result
-    assert result["status"]["code"] == 2  # StatusCode.ERROR
-    assert result["status"]["message"] == "Connection timeout"
+    assert result["status"]["code"] == 2  # Span.Status.ERROR
 
 
 def test_span_with_ok_status():
@@ -212,18 +206,17 @@ def test_span_with_ok_status():
         name="successful_operation",
         start_time_ns=start_time,
         end_time_ns=end_time,
-        status=SpanStatus(code=StatusCode.OK),
+        status=Span.Status.OK,
     )
 
     result = _span_to_dict(span)
 
     assert "status" in result
-    assert result["status"]["code"] == 1  # StatusCode.OK
-    assert result["status"]["message"] == ""
+    assert result["status"]["code"] == 1  # Span.Status.OK
 
 
-def test_span_with_unset_status_and_message():
-    """Test that UNSET status with a message is included."""
+def test_span_with_unset_status():
+    """Test that UNSET status is omitted from output."""
     trace_id = new_trace_id()
     span_id = new_span_id()
     start_time = now_ns()
@@ -235,36 +228,12 @@ def test_span_with_unset_status_and_message():
         name="operation",
         start_time_ns=start_time,
         end_time_ns=end_time,
-        status=SpanStatus(code=StatusCode.UNSET, message="Some info"),
+        status=Span.Status.UNSET,
     )
 
     result = _span_to_dict(span)
 
-    # UNSET with message should be included
-    assert "status" in result
-    assert result["status"]["code"] == 0
-    assert result["status"]["message"] == "Some info"
-
-
-def test_span_with_unset_status_no_message():
-    """Test that UNSET status without message is omitted."""
-    trace_id = new_trace_id()
-    span_id = new_span_id()
-    start_time = now_ns()
-    end_time = start_time + 1000000
-
-    span = Span(
-        trace_id=trace_id,
-        span_id=span_id,
-        name="operation",
-        start_time_ns=start_time,
-        end_time_ns=end_time,
-        status=SpanStatus(code=StatusCode.UNSET),
-    )
-
-    result = _span_to_dict(span)
-
-    # UNSET without message should be omitted
+    # UNSET status should be omitted
     assert "status" not in result
 
 
@@ -306,7 +275,7 @@ def test_round_trip_json_serialization():
         span_id=span_id,
         parent_span_id=parent_span_id,
         name="complex_operation",
-        kind=SpanKind.SERVER,
+        kind=Span.Kind.SERVER,
         start_time_ns=start_time,
         end_time_ns=end_time,
         attributes={
@@ -319,13 +288,13 @@ def test_round_trip_json_serialization():
             "metadata": {"version": "1.0", "region": "us-west"},
         },
         events=[
-            Event(
+            Span.Event(
                 name="processing_started",
                 timestamp_ns=event_time,
                 attributes={"processor": "main"},
             )
         ],
-        status=SpanStatus(code=StatusCode.OK),
+        status=Span.Status.OK,
     )
 
     # Convert to dict
@@ -362,7 +331,6 @@ def test_round_trip_json_serialization():
 
     # Verify status
     assert parsed["status"]["code"] == 1  # OK
-    assert parsed["status"]["message"] == ""
 
     # Ensure the JSON is valid and parseable
     assert isinstance(parsed, dict)

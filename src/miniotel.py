@@ -33,36 +33,6 @@ from enum import IntEnum
 from typing import Any
 
 
-class SpanKind(IntEnum):
-    """The type of span, indicating its role in a distributed trace."""
-
-    UNSPECIFIED = 0
-    INTERNAL = 1
-    SERVER = 2
-    CLIENT = 3
-    PRODUCER = 4
-    CONSUMER = 5
-
-
-class StatusCode(IntEnum):
-    """The status of a completed span: unset, ok, or error."""
-
-    UNSET = 0
-    OK = 1
-    ERROR = 2
-
-
-class Severity(IntEnum):
-    """Log severity levels following OpenTelemetry severity number ranges."""
-
-    TRACE = 1
-    DEBUG = 5
-    INFO = 9
-    WARN = 13
-    ERROR = 17
-    FATAL = 21
-
-
 def new_trace_id() -> str:
     """Generate a random 16-byte trace ID as a 32-character lowercase hex string."""
     return os.urandom(16).hex()
@@ -107,32 +77,6 @@ class InstrumentationScope:
 
 
 @dataclass
-class Event:
-    """An event represents a notable occurrence during a span's lifetime."""
-
-    name: str
-    timestamp_ns: int
-    attributes: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class Link:
-    """A link associates a span with another span in the same or different trace."""
-
-    trace_id: str
-    span_id: str
-    attributes: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class SpanStatus:
-    """The status of a completed span indicating success or error."""
-
-    code: StatusCode = StatusCode.UNSET
-    message: str = ""
-
-
-@dataclass
 class Span:
     """A span represents a single operation within a trace.
 
@@ -140,17 +84,53 @@ class Span:
     A root span has no parent_span_id; child spans reference their parent.
     """
 
+    class Kind(IntEnum):
+        """The type of span, indicating its role in a distributed trace."""
+
+        UNSPECIFIED = 0
+        INTERNAL = 1
+        SERVER = 2
+        CLIENT = 3
+        PRODUCER = 4
+        CONSUMER = 5
+
+    class Status(IntEnum):
+        """The status of a completed span: unset, ok, or error.
+
+        Note: Status message is not currently supported.
+        """
+
+        UNSET = 0
+        OK = 1
+        ERROR = 2
+
+    @dataclass
+    class Event:
+        """An event represents a notable occurrence during a span's lifetime."""
+
+        name: str
+        timestamp_ns: int
+        attributes: dict[str, Any] = field(default_factory=dict)
+
+    @dataclass
+    class Link:
+        """A link associates a span with another span in the same or different trace."""
+
+        trace_id: str
+        span_id: str
+        attributes: dict[str, Any] = field(default_factory=dict)
+
     trace_id: str
     span_id: str
     name: str
     start_time_ns: int
     end_time_ns: int
     parent_span_id: str = ""
-    kind: SpanKind = SpanKind.INTERNAL
+    kind: Kind = Kind.INTERNAL
     attributes: dict[str, Any] = field(default_factory=dict)
     events: list[Event] = field(default_factory=list)
     links: list[Link] = field(default_factory=list)
-    status: SpanStatus | None = None
+    status: Status | None = None
 
     def send(
         self,
@@ -170,6 +150,16 @@ class LogRecord:
     Logs can be correlated with traces by setting trace_id and span_id.
     Timestamps default to 0, which means "use current time when sending".
     """
+
+    class Severity(IntEnum):
+        """Log severity levels following OpenTelemetry severity number ranges."""
+
+        TRACE = 1
+        DEBUG = 5
+        INFO = 9
+        WARN = 13
+        ERROR = 17
+        FATAL = 21
 
     body: Any
     timestamp_ns: int = 0
@@ -232,13 +222,13 @@ def send_spans(
             name="POST /api/orders",
             start_time_ns=start,
             end_time_ns=now_ns(),
-            kind=SpanKind.SERVER,
+            kind=Span.Kind.SERVER,
             attributes={
                 "http.method": "POST",
                 "http.route": "/api/orders",
                 "http.status_code": 201,
             },
-            status=SpanStatus(StatusCode.OK),
+            status=Span.Status.OK,
         )
 
         # Child span for the database insert
@@ -249,7 +239,7 @@ def send_spans(
             name="INSERT orders",
             start_time_ns=start,
             end_time_ns=now_ns(),
-            kind=SpanKind.CLIENT,
+            kind=Span.Kind.CLIENT,
             attributes={
                 "db.system": "postgresql",
                 "db.operation": "INSERT",
@@ -329,7 +319,7 @@ def send_logs(
 
         error_log = LogRecord(
             body="Payment declined: insufficient funds",
-            severity_number=Severity.ERROR,
+            severity_number=LogRecord.Severity.ERROR,
             severity_text="ERROR",
             trace_id=trace_id,
             span_id=span_id,
@@ -507,12 +497,9 @@ def _span_to_dict(span: Span) -> dict[str, Any]:
             for link in span.links
         ]
 
-    # Include status only if it's not UNSET or has a message
-    if span.status and (span.status.code != StatusCode.UNSET or span.status.message):
-        result["status"] = {
-            "code": int(span.status.code),
-            "message": span.status.message,
-        }
+    # Include status only if set (not None and not UNSET)
+    if span.status is not None and span.status != Span.Status.UNSET:
+        result["status"] = {"code": int(span.status)}
 
     return result
 

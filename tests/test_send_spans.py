@@ -9,9 +9,6 @@ from miniotel import (
     InstrumentationScope,
     Resource,
     Span,
-    SpanKind,
-    SpanStatus,
-    StatusCode,
     new_span_id,
     new_trace_id,
     now_ns,
@@ -214,7 +211,7 @@ def test_send_spans_multiple():
         name="parent_operation",
         start_time_ns=now_ns(),
         end_time_ns=now_ns() + 2000000,
-        kind=SpanKind.SERVER,
+        kind=Span.Kind.SERVER,
     )
 
     child_span = Span(
@@ -224,8 +221,8 @@ def test_send_spans_multiple():
         name="child_operation",
         start_time_ns=now_ns() + 500000,
         end_time_ns=now_ns() + 1500000,
-        kind=SpanKind.CLIENT,
-        status=SpanStatus(code=StatusCode.OK),
+        kind=Span.Kind.CLIENT,
+        status=Span.Status.OK,
     )
 
     result = send_spans(f"http://localhost:{port}", resource, [parent_span, child_span])

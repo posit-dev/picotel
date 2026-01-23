@@ -8,7 +8,6 @@ from miniotel import (
     InstrumentationScope,
     LogRecord,
     Resource,
-    Severity,
     _log_to_dict,
     send_logs,
 )
@@ -26,7 +25,7 @@ class TestLogToDict:
 
         assert result["timeUnixNano"] == "1234567890"
         assert result["observedTimeUnixNano"] == "1234567890"
-        assert result["severityNumber"] == Severity.INFO
+        assert result["severityNumber"] == LogRecord.Severity.INFO
         assert result["body"] == {"stringValue": "Hello world"}
         # Optional fields should be omitted
         assert "severityText" not in result
@@ -68,14 +67,14 @@ class TestLogToDict:
         """Test log with custom severity level and text."""
         log = LogRecord(
             body="Error occurred",
-            severity_number=Severity.ERROR,
+            severity_number=LogRecord.Severity.ERROR,
             severity_text="ERROR",
         )
 
         with patch("miniotel.now_ns", return_value=5555555555):
             result = _log_to_dict(log)
 
-        assert result["severityNumber"] == Severity.ERROR
+        assert result["severityNumber"] == LogRecord.Severity.ERROR
         assert result["severityText"] == "ERROR"
 
     def test_log_with_attributes(self):
@@ -133,8 +132,8 @@ class TestSendLogs:
         """Test successful log export to collector."""
         resource = Resource({"service.name": "test-service"})
         logs = [
-            LogRecord(body="Log 1", severity_number=Severity.INFO),
-            LogRecord(body="Log 2", severity_number=Severity.WARN),
+            LogRecord(body="Log 1", severity_number=LogRecord.Severity.INFO),
+            LogRecord(body="Log 2", severity_number=LogRecord.Severity.WARN),
         ]
 
         mock_response = Mock()
@@ -172,7 +171,7 @@ class TestSendLogs:
         # Check first log record
         log_record = scope_logs["logRecords"][0]
         assert log_record["body"] == {"stringValue": "Log 1"}
-        assert log_record["severityNumber"] == Severity.INFO
+        assert log_record["severityNumber"] == LogRecord.Severity.INFO
 
     def test_send_logs_with_scope(self):
         """Test sending logs with instrumentation scope."""

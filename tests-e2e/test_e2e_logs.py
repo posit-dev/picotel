@@ -14,7 +14,6 @@ from miniotel import (
     InstrumentationScope,
     LogRecord,
     Resource,
-    Severity,
     new_span_id,
     new_trace_id,
     now_ns,
@@ -30,7 +29,7 @@ def test_send_single_log(collector):
     log = LogRecord(
         body="Test log message",
         timestamp_ns=timestamp,
-        severity_number=Severity.INFO,
+        severity_number=LogRecord.Severity.INFO,
         severity_text="INFO",
     )
 
@@ -50,7 +49,7 @@ def test_send_single_log(collector):
     log_records = scope_logs[0]["logRecords"]
     assert len(log_records) == 1
     assert log_records[0]["body"]["stringValue"] == "Test log message"
-    assert log_records[0]["severityNumber"] == Severity.INFO
+    assert log_records[0]["severityNumber"] == LogRecord.Severity.INFO
     assert log_records[0]["severityText"] == "INFO"
 
 
@@ -62,7 +61,7 @@ def test_send_log_with_attributes(collector):
     log = LogRecord(
         body="Log with attributes",
         timestamp_ns=timestamp,
-        severity_number=Severity.WARN,
+        severity_number=LogRecord.Severity.WARN,
         attributes={
             "user.id": "user-123",
             "request.count": 42,
@@ -93,7 +92,7 @@ def test_send_multiple_logs(collector):
         LogRecord(
             body=f"Log message {i}",
             timestamp_ns=start + i * 1_000_000,
-            severity_number=Severity.INFO,
+            severity_number=LogRecord.Severity.INFO,
         )
         for i in range(5)
     ]
@@ -128,7 +127,7 @@ def test_send_logs_with_scope(collector):
     log = LogRecord(
         body="Scoped log message",
         timestamp_ns=timestamp,
-        severity_number=Severity.DEBUG,
+        severity_number=LogRecord.Severity.DEBUG,
     )
 
     result = send_logs(collector["endpoint"], resource, [log], scope=scope)
@@ -151,19 +150,19 @@ def test_send_log_with_severity_levels(collector):
         LogRecord(
             body="Trace message",
             timestamp_ns=timestamp,
-            severity_number=Severity.TRACE,
+            severity_number=LogRecord.Severity.TRACE,
             severity_text="TRACE",
         ),
         LogRecord(
             body="Error message",
             timestamp_ns=timestamp + 1_000_000,
-            severity_number=Severity.ERROR,
+            severity_number=LogRecord.Severity.ERROR,
             severity_text="ERROR",
         ),
         LogRecord(
             body="Fatal message",
             timestamp_ns=timestamp + 2_000_000,
-            severity_number=Severity.FATAL,
+            severity_number=LogRecord.Severity.FATAL,
             severity_text="FATAL",
         ),
     ]
@@ -175,9 +174,9 @@ def test_send_log_with_severity_levels(collector):
     received_logs = output[0]["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
 
     severities = {r["body"]["stringValue"]: r["severityNumber"] for r in received_logs}
-    assert severities["Trace message"] == Severity.TRACE
-    assert severities["Error message"] == Severity.ERROR
-    assert severities["Fatal message"] == Severity.FATAL
+    assert severities["Trace message"] == LogRecord.Severity.TRACE
+    assert severities["Error message"] == LogRecord.Severity.ERROR
+    assert severities["Fatal message"] == LogRecord.Severity.FATAL
 
 
 def test_send_log_with_trace_correlation(collector):
@@ -192,7 +191,7 @@ def test_send_log_with_trace_correlation(collector):
         timestamp_ns=timestamp,
         trace_id=trace_id,
         span_id=span_id,
-        severity_number=Severity.INFO,
+        severity_number=LogRecord.Severity.INFO,
     )
 
     result = send_logs(collector["endpoint"], resource, [log])

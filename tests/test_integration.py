@@ -7,14 +7,9 @@ They combine multiple components to ensure proper OTLP protocol compliance.
 import json
 
 from miniotel import (
-    Event,
     InstrumentationScope,
-    Link,
     Resource,
     Span,
-    SpanKind,
-    SpanStatus,
-    StatusCode,
     _span_to_dict,
     new_span_id,
     new_trace_id,
@@ -159,12 +154,12 @@ def test_complex_span_with_all_components():
 
     # Create events with attributes
     events = [
-        Event(
+        Span.Event(
             name="cache.hit",
             timestamp_ns=event_time1,
             attributes={"cache.key": "user:123", "cache.size": 256},
         ),
-        Event(
+        Span.Event(
             name="exception",
             timestamp_ns=event_time2,
             attributes={
@@ -177,12 +172,12 @@ def test_complex_span_with_all_components():
 
     # Create links with attributes
     links = [
-        Link(
+        Span.Link(
             trace_id=new_trace_id(),
             span_id=new_span_id(),
             attributes={"link.type": "child_of"},
         ),
-        Link(
+        Span.Link(
             trace_id=new_trace_id(),
             span_id=new_span_id(),
             attributes={"link.type": "follows_from", "async": True},
@@ -195,7 +190,7 @@ def test_complex_span_with_all_components():
         span_id=span_id,
         parent_span_id=parent_span_id,
         name="complex_operation",
-        kind=SpanKind.SERVER,
+        kind=Span.Kind.SERVER,
         start_time_ns=start_time,
         end_time_ns=end_time,
         attributes={
@@ -207,7 +202,7 @@ def test_complex_span_with_all_components():
         },
         events=events,
         links=links,
-        status=SpanStatus(StatusCode.ERROR, "Database connection failed"),
+        status=Span.Status.ERROR,
     )
 
     # Serialize to OTLP JSON
@@ -258,7 +253,6 @@ def test_complex_span_with_all_components():
 
     # Verify status
     assert span_dict["status"]["code"] == 2  # ERROR
-    assert span_dict["status"]["message"] == "Database connection failed"
 
 
 # Note: test_log_record_variations and test_log_edge_cases removed
