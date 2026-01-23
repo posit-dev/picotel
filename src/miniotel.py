@@ -25,6 +25,7 @@ import base64
 import json
 import logging
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -82,6 +83,17 @@ class Span:
 
     Spans can be nested to form a tree structure representing the call hierarchy.
     A root span has no parent_span_id; child spans reference their parent.
+
+    Can be used as a context manager to automatically set times and send the span::
+
+        with Span(
+            name="process_request",
+            endpoint="http://localhost:4318",
+            resource=Resource({"service.name": "myapp"}),
+        ) as span:
+            # do work
+            span.attributes["status"] = "success"
+        # span is automatically sent on exit
     """
 
     class Kind(IntEnum):
@@ -131,6 +143,23 @@ class Span:
     events: list[Event] = field(default_factory=list)
     links: list[Link] = field(default_factory=list)
     status: Status | None = None
+    # Context manager fields - not serialized to OTLP
+    endpoint: str = ""
+    resource: Resource | None = None
+    scope: InstrumentationScope | None = None
+
+    def __enter__(self) -> Span:
+        """Enter the context manager, setting start_time_ns if not already set."""
+        if self.start_time_ns == 0:
+            self.start_time_ns = now_ns()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:  # noqa: ANN401
+        """Exit the context manager, setting end_time_ns and sending the span."""
+        if self.end_time_ns == 0:
+            self.end_time_ns = now_ns()
+        if self.endpoint and self.resource:
+            send_spans(self.endpoint, self.resource, [self], self.scope)
 
     def send(
         self,
@@ -180,6 +209,108 @@ class LogRecord:
     ) -> bool:
         """Send this log record to an OTLP collector over HTTP."""
         return send_logs(endpoint, resource, [self], scope, timeout)
+
+
+class OTLPHandler(logging.Handler):
+    """Python logging handler that sends logs to an OTLP collector.
+
+    Integrates with Python's standard logging module to automatically export
+    logs to an OpenTelemetry collector. Logs are sent immediately (no batching).
+
+    Example usage::
+
+        import logging
+        from miniotel import OTLPHandler, Resource
+
+        # Configure the handler
+        handler = OTLPHandler(
+            endpoint="http://localhost:4318",
+            resource=Resource({"service.name": "myapp", "service.version": "1.0.0"}),
+        )
+
+        # Add to root logger
+        logging.getLogger().addHandler(handler)
+
+        # Normal logging now goes to OTLP
+        logging.info("Server started on port 8080")
+
+        # With trace correlation via extra dict
+        logging.error(
+            "Database connection failed",
+            extra={"trace_id": trace_id, "span_id": span_id},
+        )
+    """
+
+    def __init__(
+        self,
+        endpoint: str,
+        resource: Resource,
+        scope: InstrumentationScope | None = None,
+        level: int = logging.NOTSET,
+    ) -> None:
+        """Initialize the OTLP handler.
+
+        :param str endpoint: Base URL of the OTLP collector (e.g., "http://localhost:4318")
+        :param Resource resource: Resource attributes describing the service
+        :param InstrumentationScope scope: Optional instrumentation scope metadata
+        :param int level: Minimum log level to export (default: NOTSET exports all)
+        """
+        super().__init__(level)
+        self.endpoint = endpoint
+        self.resource = resource
+        self.scope = scope
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Export a log record to the OTLP collector.
+
+        Maps Python logging levels to OTLP severity numbers and automatically
+        captures code location attributes. Sends logs immediately without batching.
+
+        On error, prints a message to stderr but doesn't raise to avoid disrupting
+        the application.
+
+        :param record: The log record to export
+        """
+        try:
+            # Map Python log level to OTLP severity number
+            if record.levelno <= logging.DEBUG:
+                severity = LogRecord.Severity.DEBUG
+            elif record.levelno <= logging.INFO:
+                severity = LogRecord.Severity.INFO
+            elif record.levelno <= logging.WARNING:
+                severity = LogRecord.Severity.WARN
+            elif record.levelno <= logging.ERROR:
+                severity = LogRecord.Severity.ERROR
+            else:
+                severity = LogRecord.Severity.FATAL
+
+            # Build attributes with code location
+            attributes = {
+                "code.filepath": record.pathname,
+                "code.lineno": record.lineno,
+                "code.function": record.funcName,
+            }
+
+            # Extract trace correlation from extra dict if present
+            trace_id = getattr(record, "trace_id", "")
+            span_id = getattr(record, "span_id", "")
+
+            # Create and send the log record
+            log = LogRecord(
+                body=record.getMessage(),  # Use interpolated message
+                timestamp_ns=int(record.created * 1_000_000_000),
+                trace_id=trace_id,
+                span_id=span_id,
+                severity_number=severity,
+                severity_text=record.levelname,
+                attributes=attributes,
+            )
+
+            send_logs(self.endpoint, self.resource, [log], self.scope)
+        except Exception:
+            # Don't let logging errors crash the application
+            sys.stderr.write("miniotel: failed to send log\n")
+            sys.stderr.flush()
 
 
 # -----------------------------------------------------------------------------
