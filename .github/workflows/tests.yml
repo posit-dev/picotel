@@ -25,3 +25,22 @@ jobs:
     - name: Run tests
       run: |
         pytest -v tests
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ">=3.12"
+
+      - name: Install dependencies
+        run: pip install pytest
+
+      - name: Bootstrap otelcol
+        run: ./tests-e2e/bootstrap.sh
+
+      - name: Run E2E tests
+        run: pytest tests-e2e/ -v
