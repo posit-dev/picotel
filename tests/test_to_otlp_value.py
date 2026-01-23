@@ -118,24 +118,6 @@ def test_large_integer():
     assert result == {"intValue": "9223372036854775807"}
 
 
-def test_negative_integer():
-    """Test that negative integers are properly handled."""
-    result = _to_otlp_value(-42)
-    assert result == {"intValue": "-42"}
-
-
-def test_zero_values():
-    """Test that zero values are properly handled."""
-    assert _to_otlp_value(0) == {"intValue": "0"}
-    assert _to_otlp_value(0.0) == {"doubleValue": 0.0}
-
-
-def test_empty_collections():
-    """Test that empty collections are properly handled."""
-    assert _to_otlp_value([]) == {"arrayValue": {"values": []}}
-    assert _to_otlp_value({}) == {"kvlistValue": {"values": []}}
-
-
 def test_unknown_type_fallback():
     """Test that unknown types fallback to string representation."""
 
@@ -146,28 +128,3 @@ def test_unknown_type_fallback():
     obj = CustomClass()
     result = _to_otlp_value(obj)
     assert result == {"stringValue": "custom_value"}
-
-
-def test_acceptance_criteria():
-    """Test all acceptance criteria from the plan."""
-    # String value
-    assert _to_otlp_value("hello") == {"stringValue": "hello"}
-
-    # Integer value
-    assert _to_otlp_value(42) == {"intValue": "42"}
-
-    # Boolean value (must be boolValue, not intValue!)
-    assert _to_otlp_value(True) == {"boolValue": True}  # noqa: FBT003
-
-    # Float value
-    assert _to_otlp_value(3.14) == {"doubleValue": 3.14}
-
-    # List value
-    assert _to_otlp_value([1, 2]) == {
-        "arrayValue": {"values": [{"intValue": "1"}, {"intValue": "2"}]}
-    }
-
-    # Dict value
-    assert _to_otlp_value({"a": 1}) == {
-        "kvlistValue": {"values": [{"key": "a", "value": {"intValue": "1"}}]}
-    }

@@ -292,3 +292,37 @@ def _span_to_dict(span: Span) -> dict[str, Any]:
         }
 
     return result
+
+
+def _log_to_dict(log: LogRecord) -> dict[str, Any]:
+    """Return the OTLP JSON dict representation of a LogRecord.
+
+    :param log: The LogRecord object to serialize
+
+    """
+    # Use current time for timestamps if not provided (0 means "now")
+    result = {
+        "timeUnixNano": str(log.timestamp_ns or now_ns()),
+        "observedTimeUnixNano": str(log.observed_timestamp_ns or now_ns()),
+        "severityNumber": log.severity_number,
+        "body": _to_otlp_value(log.body),
+    }
+
+    # Optional fields - omit if empty/default
+    if log.severity_text:
+        result["severityText"] = log.severity_text
+
+    attrs = _attributes_to_otlp(log.attributes)
+    if attrs:
+        result["attributes"] = attrs
+
+    if log.trace_id:
+        result["traceId"] = log.trace_id
+
+    if log.span_id:
+        result["spanId"] = log.span_id
+
+    if log.trace_flags:
+        result["flags"] = log.trace_flags
+
+    return result
