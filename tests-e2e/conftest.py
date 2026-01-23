@@ -6,10 +6,11 @@ import json
 import os
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
-
 
 TESTS_E2E_DIR = Path(__file__).parent
 CONFIG_PATH = TESTS_E2E_DIR / "config" / "otelcol.yaml"
@@ -66,21 +67,18 @@ def collector(otelcol_binary: Path, otelcol_output_file: Path):
 
 def _wait_for_collector(endpoint: str, timeout: float = 10) -> None:
     """Wait for collector to be ready to accept connections."""
-    import urllib.request
-    import urllib.error
-
     start = time.time()
     url = endpoint + "/v1/traces"
     while time.time() - start < timeout:
         try:
             # Send empty request to check if collector is up
-            req = urllib.request.Request(
+            req = urllib.request.Request(  # noqa: S310
                 url,
                 data=b"{}",
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            urllib.request.urlopen(req, timeout=1)
+            urllib.request.urlopen(req, timeout=1)  # noqa: S310
             return
         except (urllib.error.URLError, OSError):
             time.sleep(0.1)
@@ -102,9 +100,9 @@ def read_collector_output(output_file: Path, wait_time: float = 0.3) -> list[dic
         return []
 
     results = []
-    with open(output_file) as f:
-        for line in f:
-            line = line.strip()
+    with output_file.open() as f:
+        for raw_line in f:
+            line = raw_line.strip()
             if line:
                 results.append(json.loads(line))
     return results

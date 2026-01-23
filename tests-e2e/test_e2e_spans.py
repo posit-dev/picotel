@@ -6,7 +6,9 @@ import sys
 from pathlib import Path
 
 # Add src to path so we can import miniotel
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from conftest import read_collector_output
 
 from miniotel import (
     Event,
@@ -21,8 +23,6 @@ from miniotel import (
     now_ns,
     send_spans,
 )
-
-from conftest import read_collector_output
 
 
 def test_send_single_span(collector):
