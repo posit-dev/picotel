@@ -5,6 +5,7 @@
 import logging
 from unittest.mock import patch
 
+import picotel
 from picotel import (
     InstrumentationScope,
     LogRecord,
@@ -390,10 +391,11 @@ class TestOTLPHandler:
 
     def test_otlp_handler_exception_writes_to_stderr(self):
         """Test that exceptions during emit are caught and written to stderr."""
-        import picotel
         resource = Resource({"service.name": "test_service"})
 
-        with patch.object(picotel, "send_logs", side_effect=Exception("Network error")) as mock_send:
+        with patch.object(
+            picotel, "send_logs", side_effect=Exception("Network error")
+        ) as mock_send:
             with patch.object(picotel.sys, "stderr") as mock_stderr:
                 logger = logging.getLogger("test_exception_stderr")
                 logger.setLevel(logging.INFO)
@@ -445,8 +447,6 @@ class TestSpanSendMethod:
 
     def test_span_send_with_env_vars(self):
         """Test Span.send() uses environment variables when parameters are None."""
-        import picotel
-
         # Clear caches before test
         picotel._get_endpoint.cache_clear()
         picotel._get_resource_from_env.cache_clear()
@@ -478,8 +478,6 @@ class TestSpanSendMethod:
 
     def test_span_send_fails_without_config(self):
         """Test Span.send() returns False when no config is available."""
-        import picotel
-
         # Clear caches before test
         picotel._get_endpoint.cache_clear()
         picotel._get_resource_from_env.cache_clear()
@@ -531,8 +529,6 @@ class TestLogRecordSendMethod:
 
     def test_log_send_with_env_vars(self):
         """Test LogRecord.send() uses environment variables when parameters are None."""
-        import picotel
-
         # Clear caches before test
         picotel._get_endpoint.cache_clear()
         picotel._get_resource_from_env.cache_clear()
@@ -558,8 +554,6 @@ class TestLogRecordSendMethod:
 
     def test_log_send_fails_without_config(self):
         """Test LogRecord.send() returns False when no config is available."""
-        import picotel
-
         # Clear caches before test
         picotel._get_endpoint.cache_clear()
         picotel._get_resource_from_env.cache_clear()

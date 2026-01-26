@@ -181,7 +181,7 @@ class Span:
             self.start_time_ns = now_ns()
         return self
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:  # noqa: ANN401
+    def __exit__(self, _exc_type: Any, _exc_val: Any, _exc_tb: Any) -> None:  # noqa: ANN401
         """Exit the context manager, setting end_time_ns and sending the span."""
         if self.end_time_ns == 0:
             self.end_time_ns = now_ns()
@@ -615,9 +615,9 @@ def _get_endpoint(signal: str = "traces") -> str | None:
     :param signal: The signal type - "traces" or "logs"
 
     Environment variables checked (in order):
-    - PICOTEL_EXPORTER_OTLP_TRACES_ENDPOINT / PICOTEL_EXPORTER_OTLP_LOGS_ENDPOINT (as-is)
+    - PICOTEL_EXPORTER_OTLP_{TRACES,LOGS}_ENDPOINT (as-is)
     - PICOTEL_EXPORTER_OTLP_ENDPOINT (with /v1/{signal} appended)
-    - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_LOGS_ENDPOINT (as-is)
+    - OTEL_EXPORTER_OTLP_{TRACES,LOGS}_ENDPOINT (as-is)
     - OTEL_EXPORTER_OTLP_ENDPOINT (with /v1/{signal} appended)
     """
 
@@ -637,12 +637,13 @@ def _get_endpoint(signal: str = "traces") -> str | None:
 def _parse_headers() -> dict[str, str]:
     """Parse headers from environment variable.
 
-    Checks PICOTEL_EXPORTER_OTLP_HEADERS first, falls back to OTEL_EXPORTER_OTLP_HEADERS.
+    Checks PICOTEL_EXPORTER_OTLP_HEADERS first, then OTEL_EXPORTER_OTLP_HEADERS.
     Format: key1=value1,key2=value2
     Returns empty dict if not set or invalid.
     """
     headers_str = os.environ.get(
-        "PICOTEL_EXPORTER_OTLP_HEADERS", os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
+        "PICOTEL_EXPORTER_OTLP_HEADERS",
+        os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
     )
     if not headers_str:
         return {}
