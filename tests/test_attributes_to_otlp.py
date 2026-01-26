@@ -1,6 +1,6 @@
 """Tests for the _attributes_to_otlp() helper function."""
 
-from miniotel import _attributes_to_otlp
+from picotel import _attributes_to_otlp
 
 
 def test_basic_attributes():

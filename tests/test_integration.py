@@ -1,4 +1,4 @@
-"""Integration tests for miniotel library.
+"""Integration tests for picotel library.
 
 These tests verify end-to-end functionality rather than testing Python features.
 They combine multiple components to ensure proper OTLP protocol compliance.
@@ -6,7 +6,7 @@ They combine multiple components to ensure proper OTLP protocol compliance.
 
 import json
 
-from miniotel import (
+from picotel import (
     InstrumentationScope,
     Resource,
     Span,
@@ -83,7 +83,7 @@ def test_resource_and_scope_serialization():
             "service.version": "1.0.0",
             "deployment.environment": "production",
             "host.name": "server-01",
-            "telemetry.sdk.name": "miniotel",
+            "telemetry.sdk.name": "picotel",
             "telemetry.sdk.version": "0.1.0",
         }
     )

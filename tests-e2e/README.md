@@ -1,6 +1,6 @@
 # E2E Tests
 
-End-to-end tests that validate miniotel against a real OpenTelemetry Collector.
+End-to-end tests that validate picotel against a real OpenTelemetry Collector.
 
 ## Setup
 

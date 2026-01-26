@@ -5,19 +5,19 @@
 import os
 from unittest.mock import patch
 
-import miniotel
-from miniotel import TRACEPARENT, LogRecord, Span
+import picotel
+from picotel import TRACEPARENT, LogRecord, Span
 
 
 def test_parse_traceparent_valid():
     """Test parsing valid TRACEPARENT format."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(
         os.environ,
         {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
     ):
-        result = miniotel._parse_traceparent()
+        result = picotel._parse_traceparent()
         assert result is not None
         trace_id, parent_id, trace_flags = result
         assert trace_id == "0af7651916cd43dd8448eb211c80319c"
@@ -27,10 +27,10 @@ def test_parse_traceparent_valid():
 
 def test_parse_traceparent_not_set():
     """Test parsing when TRACEPARENT is not set."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(os.environ, {}, clear=True):
-        assert miniotel._parse_traceparent() is None
+        assert picotel._parse_traceparent() is None
 
 
 def test_parse_traceparent_invalid_format():
@@ -62,16 +62,16 @@ def test_parse_traceparent_invalid_format():
     ]
 
     for invalid_value in test_cases:
-        miniotel._parse_traceparent.cache_clear()
+        picotel._parse_traceparent.cache_clear()
         with patch.dict(os.environ, {"TRACEPARENT": invalid_value}):
-            assert miniotel._parse_traceparent() is None, (
+            assert picotel._parse_traceparent() is None, (
                 f"Should reject: {invalid_value}"
             )
 
 
 def test_span_with_traceparent_sentinel():
     """Test Span with TRACEPARENT sentinel reads from env."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(
         os.environ,
@@ -86,10 +86,10 @@ def test_span_with_traceparent_sentinel():
 
 def test_span_with_traceparent_sentinel_no_env():
     """Test Span with TRACEPARENT sentinel and no env var logs error."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(os.environ, {}, clear=True), patch.object(
-        miniotel._logger, "error"
+        picotel._logger, "error"
     ) as mock_error:
         span = Span(
             trace_id=TRACEPARENT, name="test", start_time_ns=1000, end_time_ns=2000
@@ -101,7 +101,7 @@ def test_span_with_traceparent_sentinel_no_env():
 
 def test_span_with_explicit_trace_id():
     """Test Span with explicit trace_id does not read from TRACEPARENT."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(
         os.environ,
@@ -121,7 +121,7 @@ def test_span_with_explicit_trace_id():
 
 def test_span_with_traceparent_and_explicit_parent():
     """Test Span with TRACEPARENT sentinel but explicit parent_span_id."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(
         os.environ,
@@ -142,7 +142,7 @@ def test_span_with_traceparent_and_explicit_parent():
 
 def test_span_without_traceparent_explicit_trace_required():
     """Test Span without TRACEPARENT sentinel requires explicit trace_id."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(os.environ, {}, clear=True):
         # With explicit trace_id, should work fine
@@ -157,7 +157,7 @@ def test_span_without_traceparent_explicit_trace_required():
 
 def test_span_span_id_always_generated():
     """Test Span without span_id always generates a new span_id."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(
         os.environ,
@@ -174,7 +174,7 @@ def test_span_span_id_always_generated():
 
 def test_logrecord_with_traceparent_sentinel():
     """Test LogRecord with TRACEPARENT sentinel populates trace_id and span_id."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(
         os.environ,
@@ -187,10 +187,10 @@ def test_logrecord_with_traceparent_sentinel():
 
 def test_logrecord_with_traceparent_sentinel_no_env():
     """Test LogRecord with TRACEPARENT sentinel and no env var logs error."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(os.environ, {}, clear=True), patch.object(
-        miniotel._logger, "error"
+        picotel._logger, "error"
     ) as mock_error:
         log = LogRecord(body="test log", trace_id=TRACEPARENT)
         assert log.trace_id == ""
@@ -201,7 +201,7 @@ def test_logrecord_with_traceparent_sentinel_no_env():
 
 def test_logrecord_without_traceparent_sentinel():
     """Test LogRecord without TRACEPARENT sentinel has empty trace_id and span_id."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(
         os.environ,
@@ -215,7 +215,7 @@ def test_logrecord_without_traceparent_sentinel():
 
 def test_logrecord_with_explicit_trace_id():
     """Test LogRecord with explicit trace_id does not read from TRACEPARENT."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(
         os.environ,
@@ -231,7 +231,7 @@ def test_logrecord_with_explicit_trace_id():
 
 def test_logrecord_with_traceparent_and_explicit_span_id():
     """Test LogRecord with TRACEPARENT sentinel but explicit span_id."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(
         os.environ,
@@ -250,26 +250,26 @@ def test_logrecord_with_traceparent_and_explicit_span_id():
 
 def test_traceparent_caching():
     """Test that _parse_traceparent result is cached."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(
         os.environ,
         {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
     ):
-        result1 = miniotel._parse_traceparent()
-        result2 = miniotel._parse_traceparent()
+        result1 = picotel._parse_traceparent()
+        result2 = picotel._parse_traceparent()
         assert result1 is result2  # Same object reference due to caching
 
 
 def test_traceparent_with_uppercase_hex():
     """Test that TRACEPARENT with uppercase hex is accepted."""
-    miniotel._parse_traceparent.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     with patch.dict(
         os.environ,
         {"TRACEPARENT": "00-0AF7651916CD43DD8448EB211C80319C-B7AD6B7169203331-FF"},
     ):
-        result = miniotel._parse_traceparent()
+        result = picotel._parse_traceparent()
         assert result is not None
         trace_id, parent_id, trace_flags = result
         assert trace_id == "0AF7651916CD43DD8448EB211C80319C"
@@ -279,4 +279,4 @@ def test_traceparent_with_uppercase_hex():
 
 def test_traceparent_sentinel_identity():
     """Test that TRACEPARENT sentinel can be checked with 'is'."""
-    assert TRACEPARENT is miniotel.TRACEPARENT
+    assert TRACEPARENT is picotel.TRACEPARENT

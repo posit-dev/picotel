@@ -5,7 +5,7 @@
 import logging
 from unittest.mock import patch
 
-from miniotel import (
+from picotel import (
     InstrumentationScope,
     LogRecord,
     OTLPHandler,
@@ -64,7 +64,7 @@ class TestSpanContextManager:
         trace_id = new_trace_id()
         span_id = new_span_id()
 
-        with patch("miniotel.send_spans") as mock_send:
+        with patch("picotel.send_spans") as mock_send:
             mock_send.return_value = True
 
             with Span(
@@ -95,7 +95,7 @@ class TestSpanContextManager:
         trace_id = new_trace_id()
         span_id = new_span_id()
 
-        with patch("miniotel.send_spans") as mock_send:
+        with patch("picotel.send_spans") as mock_send:
             with Span(
                 trace_id=trace_id,
                 span_id=span_id,
@@ -115,7 +115,7 @@ class TestSpanContextManager:
         trace_id = new_trace_id()
         span_id = new_span_id()
 
-        with patch("miniotel.send_spans") as mock_send:
+        with patch("picotel.send_spans") as mock_send:
             mock_send.return_value = True
 
             with Span(
@@ -140,7 +140,7 @@ class TestSpanContextManager:
         resource = Resource({"service.name": "test_service"})
         trace_id = new_trace_id()
 
-        with patch("miniotel.send_spans") as mock_send:
+        with patch("picotel.send_spans") as mock_send:
             mock_send.return_value = True
 
             with Span(
@@ -192,7 +192,7 @@ class TestOTLPHandler:
         """Test basic logging through OTLPHandler."""
         resource = Resource({"service.name": "test_service"})
 
-        with patch("miniotel.send_logs") as mock_send:
+        with patch("picotel.send_logs") as mock_send:
             mock_send.return_value = True
 
             # Create logger with OTLPHandler
@@ -229,7 +229,7 @@ class TestOTLPHandler:
         """Test that Python log levels map correctly to OTLP severity."""
         resource = Resource({"service.name": "test_service"})
 
-        with patch("miniotel.send_logs") as mock_send:
+        with patch("picotel.send_logs") as mock_send:
             mock_send.return_value = True
 
             logger = logging.getLogger("test_severity")
@@ -265,7 +265,7 @@ class TestOTLPHandler:
         trace_id = new_trace_id()
         span_id = new_span_id()
 
-        with patch("miniotel.send_logs") as mock_send:
+        with patch("picotel.send_logs") as mock_send:
             mock_send.return_value = True
 
             logger = logging.getLogger("test_trace")
@@ -292,7 +292,7 @@ class TestOTLPHandler:
         resource = Resource({"service.name": "test_service"})
         scope = InstrumentationScope("test_instrumentation", "2.0.0")
 
-        with patch("miniotel.send_logs") as mock_send:
+        with patch("picotel.send_logs") as mock_send:
             mock_send.return_value = True
 
             logger = logging.getLogger("test_scope")
@@ -334,7 +334,7 @@ class TestOTLPHandler:
         """Test that log messages are properly interpolated."""
         resource = Resource({"service.name": "test_service"})
 
-        with patch("miniotel.send_logs") as mock_send:
+        with patch("picotel.send_logs") as mock_send:
             mock_send.return_value = True
 
             logger = logging.getLogger("test_interpolation")
@@ -358,7 +358,7 @@ class TestOTLPHandler:
         """Test that timestamps are correctly set from log record."""
         resource = Resource({"service.name": "test_service"})
 
-        with patch("miniotel.send_logs") as mock_send:
+        with patch("picotel.send_logs") as mock_send:
             mock_send.return_value = True
 
             logger = logging.getLogger("test_timestamp")
@@ -390,11 +390,11 @@ class TestOTLPHandler:
 
     def test_otlp_handler_exception_writes_to_stderr(self):
         """Test that exceptions during emit are caught and written to stderr."""
-        import miniotel
+        import picotel
         resource = Resource({"service.name": "test_service"})
 
-        with patch.object(miniotel, "send_logs", side_effect=Exception("Network error")) as mock_send:
-            with patch.object(miniotel.sys, "stderr") as mock_stderr:
+        with patch.object(picotel, "send_logs", side_effect=Exception("Network error")) as mock_send:
+            with patch.object(picotel.sys, "stderr") as mock_stderr:
                 logger = logging.getLogger("test_exception_stderr")
                 logger.setLevel(logging.INFO)
                 handler = OTLPHandler("http://localhost:4318", resource)
@@ -417,7 +417,7 @@ class TestSpanSendMethod:
         trace_id = new_trace_id()
         span_id = new_span_id()
 
-        with patch("miniotel.send_spans") as mock_send:
+        with patch("picotel.send_spans") as mock_send:
             mock_send.return_value = True
 
             span = Span(
@@ -445,18 +445,18 @@ class TestSpanSendMethod:
 
     def test_span_send_with_env_vars(self):
         """Test Span.send() uses environment variables when parameters are None."""
-        import miniotel
+        import picotel
 
         # Clear caches before test
-        miniotel._get_endpoint.cache_clear()
-        miniotel._get_resource_from_env.cache_clear()
+        picotel._get_endpoint.cache_clear()
+        picotel._get_resource_from_env.cache_clear()
 
-        with patch("miniotel.send_spans") as mock_send:
+        with patch("picotel.send_spans") as mock_send:
             mock_send.return_value = True
 
-            with patch("miniotel._get_endpoint") as mock_endpoint:
+            with patch("picotel._get_endpoint") as mock_endpoint:
                 mock_endpoint.return_value = "http://env:4318"
-                with patch("miniotel._get_resource_from_env") as mock_resource:
+                with patch("picotel._get_resource_from_env") as mock_resource:
                     test_resource = Resource({"service.name": "env_service"})
                     mock_resource.return_value = test_resource
 
@@ -478,15 +478,15 @@ class TestSpanSendMethod:
 
     def test_span_send_fails_without_config(self):
         """Test Span.send() returns False when no config is available."""
-        import miniotel
+        import picotel
 
         # Clear caches before test
-        miniotel._get_endpoint.cache_clear()
-        miniotel._get_resource_from_env.cache_clear()
+        picotel._get_endpoint.cache_clear()
+        picotel._get_resource_from_env.cache_clear()
 
-        with patch("miniotel._get_endpoint") as mock_endpoint:
+        with patch("picotel._get_endpoint") as mock_endpoint:
             mock_endpoint.return_value = None
-            with patch("miniotel._get_resource_from_env") as mock_resource:
+            with patch("picotel._get_resource_from_env") as mock_resource:
                 mock_resource.return_value = None
 
                 span = Span(
@@ -509,7 +509,7 @@ class TestLogRecordSendMethod:
         """Test LogRecord.send() with explicit parameters."""
         resource = Resource({"service.name": "test_service"})
 
-        with patch("miniotel.send_logs") as mock_send:
+        with patch("picotel.send_logs") as mock_send:
             mock_send.return_value = True
 
             log = LogRecord(body="test log message")
@@ -531,18 +531,18 @@ class TestLogRecordSendMethod:
 
     def test_log_send_with_env_vars(self):
         """Test LogRecord.send() uses environment variables when parameters are None."""
-        import miniotel
+        import picotel
 
         # Clear caches before test
-        miniotel._get_endpoint.cache_clear()
-        miniotel._get_resource_from_env.cache_clear()
+        picotel._get_endpoint.cache_clear()
+        picotel._get_resource_from_env.cache_clear()
 
-        with patch("miniotel.send_logs") as mock_send:
+        with patch("picotel.send_logs") as mock_send:
             mock_send.return_value = True
 
-            with patch("miniotel._get_endpoint") as mock_endpoint:
+            with patch("picotel._get_endpoint") as mock_endpoint:
                 mock_endpoint.return_value = "http://env:4318"
-                with patch("miniotel._get_resource_from_env") as mock_resource:
+                with patch("picotel._get_resource_from_env") as mock_resource:
                     test_resource = Resource({"service.name": "env_service"})
                     mock_resource.return_value = test_resource
 
@@ -558,15 +558,15 @@ class TestLogRecordSendMethod:
 
     def test_log_send_fails_without_config(self):
         """Test LogRecord.send() returns False when no config is available."""
-        import miniotel
+        import picotel
 
         # Clear caches before test
-        miniotel._get_endpoint.cache_clear()
-        miniotel._get_resource_from_env.cache_clear()
+        picotel._get_endpoint.cache_clear()
+        picotel._get_resource_from_env.cache_clear()
 
-        with patch("miniotel._get_endpoint") as mock_endpoint:
+        with patch("picotel._get_endpoint") as mock_endpoint:
             mock_endpoint.return_value = None
-            with patch("miniotel._get_resource_from_env") as mock_resource:
+            with patch("picotel._get_resource_from_env") as mock_resource:
                 mock_resource.return_value = None
 
                 log = LogRecord(body="test log message")

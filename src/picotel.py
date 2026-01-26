@@ -1,11 +1,11 @@
 # Copyright (C) 2026 by Posit Software, PBC.
 
-"""miniotel is a minimal, single-file OpenTelemetry client for Python.
+"""picotel is a minimal, single-file OpenTelemetry client for Python.
 
 It sends spans and logs over HTTP/JSON to any OTLP-compatible collector
 (Jaeger, Grafana Tempo, OTEL Collector, etc.) with zero external dependencies.
 
-This makes miniotel ideal for vendoring alongside software that needs
+This makes picotel ideal for vendoring alongside software that needs
 basic observability without pulling in the full OpenTelemetry SDK.
 
 Requires Python 3.8+ for:
@@ -15,7 +15,7 @@ Requires Python 3.8+ for:
 
 Version: 0.1.0
 Author: Alessandro Molina <alessandro.molina@posit.co>
-URL: https://github.com/posit-dev/miniotel
+URL: https://github.com/posit-dev/picotel
 License: MIT
 """
 
@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
 
-_logger = logging.getLogger("miniotel")
+_logger = logging.getLogger("picotel")
 
 # Sentinel to read trace_id/parent_span_id from TRACEPARENT env var (W3C Trace Context)
 TRACEPARENT = object()
@@ -294,7 +294,7 @@ class OTLPHandler(logging.Handler):
     Example usage::
 
         import logging
-        from miniotel import OTLPHandler, Resource
+        from picotel import OTLPHandler, Resource
 
         # Configure the handler
         handler = OTLPHandler(

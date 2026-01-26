@@ -1,8 +1,8 @@
-# miniotel
+# picotel
 
 Minimal, single-file OpenTelemetry client for Python with zero dependencies.
 
-This is designed so that you can take `src/miniotel.py` and copy it into your own project to use it without having to install dependencies.
+This is designed so that you can take `src/picotel.py` and copy it into your own project to use it without having to install dependencies.
 
 ## Features
 
@@ -15,7 +15,7 @@ This is designed so that you can take `src/miniotel.py` and copy it into your ow
 ## Usage
 
 ```python
-from miniotel import (
+from picotel import (
     Resource,
     Span,
     LogRecord,
@@ -63,7 +63,7 @@ send_logs("http://localhost:4318", resource, [log])
 
 ## Environment Variables
 
-miniotel supports standard OpenTelemetry environment variables:
+picotel supports standard OpenTelemetry environment variables:
 
 - `OTEL_EXPORTER_OTLP_ENDPOINT` - Base collector URL (e.g., `http://localhost:4318`). Path `/v1/traces` or `/v1/logs` is appended automatically.
 - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` - Traces endpoint (used as-is, no path appended)
@@ -81,13 +81,13 @@ with Span(trace_id=new_trace_id(), name="my-op", start_time_ns=0, end_time_ns=0)
 
 ## Disabling Telemetry
 
-To disable telemetry, simply don't set the OTEL environment variables. When not configured, miniotel will log warnings and return `False` from send functions.
+To disable telemetry, simply don't set the OTEL environment variables. When not configured, picotel will log warnings and return `False` from send functions.
 
 To silence the warnings:
 
 ```python
 import logging
-logging.getLogger("miniotel").setLevel(logging.ERROR)
+logging.getLogger("picotel").setLevel(logging.ERROR)
 ```
 
 ## Non-Goals

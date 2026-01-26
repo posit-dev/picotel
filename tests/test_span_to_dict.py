@@ -2,7 +2,7 @@
 
 import json
 
-from miniotel import (
+from picotel import (
     Span,
     _span_to_dict,
     new_span_id,

@@ -5,7 +5,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from miniotel import (
+from picotel import (
     InstrumentationScope,
     Resource,
     Span,
@@ -340,7 +340,7 @@ def test_send_spans_skips_invalid_trace_id():
     """Test that spans without trace_id are skipped."""
     from unittest.mock import patch  # noqa: PLC0415
 
-    import miniotel  # noqa: PLC0415
+    import picotel  # noqa: PLC0415
 
     MockOTLPHandler.captured_requests = []
 
@@ -371,7 +371,7 @@ def test_send_spans_skips_invalid_trace_id():
     invalid_span.links = []
     invalid_span.status = None
 
-    with patch.object(miniotel._logger, "error") as mock_error:
+    with patch.object(picotel._logger, "error") as mock_error:
         result = send_spans(
             f"http://localhost:{port}", resource, [valid_span, invalid_span]
         )

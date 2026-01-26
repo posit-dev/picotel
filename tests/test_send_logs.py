@@ -4,7 +4,7 @@ import json
 import urllib.error
 from unittest.mock import Mock, patch
 
-from miniotel import (
+from picotel import (
     InstrumentationScope,
     LogRecord,
     Resource,
@@ -20,7 +20,7 @@ class TestLogToDict:
         """Test converting a minimal LogRecord to OTLP dict."""
         log = LogRecord(body="Hello world")
 
-        with patch("miniotel.now_ns", return_value=1234567890):
+        with patch("picotel.now_ns", return_value=1234567890):
             result = _log_to_dict(log)
 
         assert result["timeUnixNano"] == "1234567890"
@@ -56,7 +56,7 @@ class TestLogToDict:
             trace_flags=1,
         )
 
-        with patch("miniotel.now_ns", return_value=9999999999):
+        with patch("picotel.now_ns", return_value=9999999999):
             result = _log_to_dict(log)
 
         assert result["traceId"] == "abcdef1234567890abcdef1234567890"
@@ -71,7 +71,7 @@ class TestLogToDict:
             severity_text="ERROR",
         )
 
-        with patch("miniotel.now_ns", return_value=5555555555):
+        with patch("picotel.now_ns", return_value=5555555555):
             result = _log_to_dict(log)
 
         assert result["severityNumber"] == LogRecord.Severity.ERROR
@@ -88,7 +88,7 @@ class TestLogToDict:
             },
         )
 
-        with patch("miniotel.now_ns", return_value=7777777777):
+        with patch("picotel.now_ns", return_value=7777777777):
             result = _log_to_dict(log)
 
         assert "attributes" in result
@@ -101,13 +101,13 @@ class TestLogToDict:
         """Test that different body types are converted correctly."""
         # String body
         log = LogRecord(body="String message")
-        with patch("miniotel.now_ns", return_value=1000):
+        with patch("picotel.now_ns", return_value=1000):
             result = _log_to_dict(log)
         assert result["body"] == {"stringValue": "String message"}
 
         # Dict body
         log = LogRecord(body={"error": "Something went wrong", "code": 500})
-        with patch("miniotel.now_ns", return_value=2000):
+        with patch("picotel.now_ns", return_value=2000):
             result = _log_to_dict(log)
         assert result["body"]["kvlistValue"]["values"] == [
             {"key": "error", "value": {"stringValue": "Something went wrong"}},
@@ -116,7 +116,7 @@ class TestLogToDict:
 
         # List body
         log = LogRecord(body=["item1", "item2", 3])
-        with patch("miniotel.now_ns", return_value=3000):
+        with patch("picotel.now_ns", return_value=3000):
             result = _log_to_dict(log)
         assert result["body"]["arrayValue"]["values"] == [
             {"stringValue": "item1"},
@@ -142,8 +142,8 @@ class TestSendLogs:
         mock_response.__exit__ = Mock(return_value=None)
 
         with patch(
-            "miniotel.urllib.request.urlopen", return_value=mock_response
-        ) as mock_urlopen, patch("miniotel.now_ns", return_value=1234567890):
+            "picotel.urllib.request.urlopen", return_value=mock_response
+        ) as mock_urlopen, patch("picotel.now_ns", return_value=1234567890):
             result = send_logs("http://localhost:4318", resource, logs)
 
         assert result is True
@@ -189,8 +189,8 @@ class TestSendLogs:
         mock_response.__exit__ = Mock(return_value=None)
 
         with patch(
-            "miniotel.urllib.request.urlopen", return_value=mock_response
-        ) as mock_urlopen, patch("miniotel.now_ns", return_value=9999999999):
+            "picotel.urllib.request.urlopen", return_value=mock_response
+        ) as mock_urlopen, patch("picotel.now_ns", return_value=9999999999):
             result = send_logs("http://localhost:4318", resource, logs, scope=scope)
 
         assert result is True
@@ -222,8 +222,8 @@ class TestSendLogs:
         mock_response.__exit__ = Mock(return_value=None)
 
         with patch(
-            "miniotel.urllib.request.urlopen", return_value=mock_response
-        ) as mock_urlopen, patch("miniotel.now_ns", return_value=5555555555):
+            "picotel.urllib.request.urlopen", return_value=mock_response
+        ) as mock_urlopen, patch("picotel.now_ns", return_value=5555555555):
             result = send_logs("http://localhost:4318", resource, logs)
 
         assert result is True
@@ -241,12 +241,12 @@ class TestSendLogs:
         resource = Resource({"service.name": "test-service"})
         logs = [LogRecord(body="Test log")]
 
-        with patch("miniotel.urllib.request.urlopen") as mock_urlopen:
+        with patch("picotel.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = urllib.error.HTTPError(
                 "http://localhost:4318/v1/logs", 500, "Internal Server Error", {}, None
             )
 
-            with patch("miniotel._logger.error") as mock_error:
+            with patch("picotel._logger.error") as mock_error:
                 result = send_logs("http://localhost:4318", resource, logs)
 
         assert result is False
@@ -258,10 +258,10 @@ class TestSendLogs:
         resource = Resource({"service.name": "test-service"})
         logs = [LogRecord(body="Test log")]
 
-        with patch("miniotel.urllib.request.urlopen") as mock_urlopen:
+        with patch("picotel.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = OSError("Connection refused")
 
-            with patch("miniotel._logger.error") as mock_error:
+            with patch("picotel._logger.error") as mock_error:
                 result = send_logs("http://localhost:4318", resource, logs)
 
         assert result is False
@@ -279,7 +279,7 @@ class TestSendLogs:
         mock_response.__exit__ = Mock(return_value=None)
 
         with patch(
-            "miniotel.urllib.request.urlopen", return_value=mock_response
+            "picotel.urllib.request.urlopen", return_value=mock_response
         ) as mock_urlopen:
             result = send_logs("http://localhost:4318", resource, logs)
 

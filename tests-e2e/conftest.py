@@ -41,13 +41,13 @@ def collector(otelcol_binary: Path, otelcol_output_file: Path):
     Yields a dict with endpoint and output_file path.
     """
     # Clear any cached environment variable parsers to avoid test contamination
-    import miniotel  # noqa: PLC0415
+    import picotel  # noqa: PLC0415
 
     for func in [
-        miniotel._parse_traceparent,
-        miniotel._get_endpoint,
-        miniotel._parse_headers,
-        miniotel._get_resource_from_env,
+        picotel._parse_traceparent,
+        picotel._get_endpoint,
+        picotel._parse_headers,
+        picotel._get_resource_from_env,
     ]:
         if hasattr(func, "cache_clear"):
             func.cache_clear()

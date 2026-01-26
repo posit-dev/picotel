@@ -5,8 +5,8 @@
 import os
 from unittest.mock import patch
 
-import miniotel
-from miniotel import (
+import picotel
+from picotel import (
     Resource,
     send_logs,
     send_spans,
@@ -28,7 +28,7 @@ class MockResponse:
 def test_get_endpoint_traces_specific():
     """Test that trace-specific endpoint takes precedence."""
     # Clear cache before test
-    miniotel._get_endpoint.cache_clear()
+    picotel._get_endpoint.cache_clear()
 
     with patch.dict(
         os.environ,
@@ -37,13 +37,13 @@ def test_get_endpoint_traces_specific():
             "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://traces:4318",
         },
     ):
-        assert miniotel._get_endpoint("traces") == "http://traces:4318"
+        assert picotel._get_endpoint("traces") == "http://traces:4318"
 
 
 def test_get_endpoint_logs_specific():
     """Test that logs-specific endpoint takes precedence."""
     # Clear cache before test
-    miniotel._get_endpoint.cache_clear()
+    picotel._get_endpoint.cache_clear()
 
     with patch.dict(
         os.environ,
@@ -52,7 +52,7 @@ def test_get_endpoint_logs_specific():
             "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://logs:4318",
         },
     ):
-        assert miniotel._get_endpoint("logs") == "http://logs:4318"
+        assert picotel._get_endpoint("logs") == "http://logs:4318"
 
 
 def test_get_endpoint_fallback_to_general():
@@ -61,29 +61,29 @@ def test_get_endpoint_fallback_to_general():
     Per OTEL spec, general endpoint has signal path appended.
     """
     # Clear cache before test
-    miniotel._get_endpoint.cache_clear()
+    picotel._get_endpoint.cache_clear()
 
     with patch.dict(os.environ, {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://general:4318"}):
         # General endpoint gets /v1/{signal} appended per OTEL spec
-        assert miniotel._get_endpoint("traces") == "http://general:4318/v1/traces"
-        miniotel._get_endpoint.cache_clear()
-        assert miniotel._get_endpoint("logs") == "http://general:4318/v1/logs"
+        assert picotel._get_endpoint("traces") == "http://general:4318/v1/traces"
+        picotel._get_endpoint.cache_clear()
+        assert picotel._get_endpoint("logs") == "http://general:4318/v1/logs"
 
 
 def test_get_endpoint_none_when_not_set():
     """Test that get_endpoint returns None when no env vars set."""
     # Clear cache before test
-    miniotel._get_endpoint.cache_clear()
+    picotel._get_endpoint.cache_clear()
 
     with patch.dict(os.environ, {}, clear=True):
-        assert miniotel._get_endpoint("traces") is None
-        assert miniotel._get_endpoint("logs") is None
+        assert picotel._get_endpoint("traces") is None
+        assert picotel._get_endpoint("logs") is None
 
 
 def test_parse_headers():
     """Test parsing OTEL_EXPORTER_OTLP_HEADERS environment variable."""
     # Clear cache before test
-    miniotel._parse_headers.cache_clear()
+    picotel._parse_headers.cache_clear()
 
     # Test valid headers
     with patch.dict(
@@ -94,7 +94,7 @@ def test_parse_headers():
             )
         },
     ):
-        headers = miniotel._parse_headers()
+        headers = picotel._parse_headers()
         assert headers == {
             "key1": "value1",
             "key2": "value2",
@@ -102,59 +102,59 @@ def test_parse_headers():
         }
 
     # Clear cache between tests
-    miniotel._parse_headers.cache_clear()
+    picotel._parse_headers.cache_clear()
 
     # Test empty headers
     with patch.dict(os.environ, {"OTEL_EXPORTER_OTLP_HEADERS": ""}):
-        assert miniotel._parse_headers() == {}
+        assert picotel._parse_headers() == {}
 
     # Clear cache between tests
-    miniotel._parse_headers.cache_clear()
+    picotel._parse_headers.cache_clear()
 
     # Test not set
     with patch.dict(os.environ, {}, clear=True):
-        assert miniotel._parse_headers() == {}
+        assert picotel._parse_headers() == {}
 
     # Clear cache between tests
-    miniotel._parse_headers.cache_clear()
+    picotel._parse_headers.cache_clear()
 
     # Test whitespace handling
     with patch.dict(
         os.environ, {"OTEL_EXPORTER_OTLP_HEADERS": " key1 = value1 , key2=value2 "}
     ):
-        headers = miniotel._parse_headers()
+        headers = picotel._parse_headers()
         assert headers == {"key1": "value1", "key2": "value2"}
 
 
 def test_get_resource_from_env():
     """Test creating Resource from OTEL_SERVICE_NAME."""
     # Clear cache before test
-    miniotel._get_resource_from_env.cache_clear()
+    picotel._get_resource_from_env.cache_clear()
 
     # Test when set
     with patch.dict(os.environ, {"OTEL_SERVICE_NAME": "my-service"}):
-        resource = miniotel._get_resource_from_env()
+        resource = picotel._get_resource_from_env()
         assert resource is not None
         assert resource.attributes == {"service.name": "my-service"}
 
     # Clear cache between tests
-    miniotel._get_resource_from_env.cache_clear()
+    picotel._get_resource_from_env.cache_clear()
 
     # Test when not set
     with patch.dict(os.environ, {}, clear=True):
-        assert miniotel._get_resource_from_env() is None
+        assert picotel._get_resource_from_env() is None
 
 
 def test_send_spans_with_env_endpoint(monkeypatch):
     """Test send_spans uses environment variable when endpoint is None."""
     # Clear caches before test
-    miniotel._get_endpoint.cache_clear()
-    miniotel._get_resource_from_env.cache_clear()
+    picotel._get_endpoint.cache_clear()
+    picotel._get_resource_from_env.cache_clear()
 
     # Mock urlopen to capture the request
     import urllib.request  # noqa: PLC0415
 
-    from miniotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
+    from picotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
 
     captured_request = None
 
@@ -192,13 +192,13 @@ def test_send_logs_with_env_endpoint(monkeypatch):
     Per OTEL spec, signal-specific endpoints are used as-is (include full path).
     """
     # Clear caches before test
-    miniotel._get_endpoint.cache_clear()
-    miniotel._get_resource_from_env.cache_clear()
+    picotel._get_endpoint.cache_clear()
+    picotel._get_resource_from_env.cache_clear()
 
     # Mock urlopen to capture the request
     import urllib.request  # noqa: PLC0415
 
-    from miniotel import LogRecord  # noqa: PLC0415
+    from picotel import LogRecord  # noqa: PLC0415
 
     captured_request = None
 
@@ -227,12 +227,12 @@ def test_send_logs_with_env_endpoint(monkeypatch):
 def test_send_spans_with_headers_from_env(monkeypatch):
     """Test that headers from environment are included in requests."""
     # Clear caches before test
-    miniotel._get_endpoint.cache_clear()
-    miniotel._parse_headers.cache_clear()
+    picotel._get_endpoint.cache_clear()
+    picotel._parse_headers.cache_clear()
 
     import urllib.request  # noqa: PLC0415
 
-    from miniotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
+    from picotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
 
     captured_request = None
 
@@ -276,9 +276,9 @@ def test_send_spans_with_headers_from_env(monkeypatch):
 def test_send_without_endpoint_returns_false():
     """Test that send functions return False when no endpoint is available."""
     # Clear caches before test
-    miniotel._get_endpoint.cache_clear()
+    picotel._get_endpoint.cache_clear()
 
-    from miniotel import (  # noqa: PLC0415
+    from picotel import (  # noqa: PLC0415
         LogRecord,
         Span,
         new_span_id,
@@ -304,12 +304,12 @@ def test_send_without_endpoint_returns_false():
 def test_span_context_manager_with_env(monkeypatch):
     """Test Span context manager uses environment variables."""
     # Clear caches before test
-    miniotel._get_endpoint.cache_clear()
-    miniotel._get_resource_from_env.cache_clear()
+    picotel._get_endpoint.cache_clear()
+    picotel._get_resource_from_env.cache_clear()
 
     import urllib.request  # noqa: PLC0415
 
-    from miniotel import Span, new_span_id, new_trace_id  # noqa: PLC0415
+    from picotel import Span, new_span_id, new_trace_id  # noqa: PLC0415
 
     captured_request = None
 
@@ -349,13 +349,13 @@ def test_otlp_handler_with_env(monkeypatch):
     Uses general endpoint which gets /v1/logs appended per OTEL spec.
     """
     # Clear caches before test
-    miniotel._get_endpoint.cache_clear()
-    miniotel._get_resource_from_env.cache_clear()
+    picotel._get_endpoint.cache_clear()
+    picotel._get_resource_from_env.cache_clear()
 
     import logging  # noqa: PLC0415
     import urllib.request  # noqa: PLC0415
 
-    from miniotel import OTLPHandler  # noqa: PLC0415
+    from picotel import OTLPHandler  # noqa: PLC0415
 
     captured_request = None
 

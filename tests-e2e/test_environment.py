@@ -13,8 +13,8 @@ from threading import Thread
 from time import sleep
 from unittest.mock import patch
 
-import miniotel
-from miniotel import (
+import picotel
+from picotel import (
     LogRecord,
     OTLPHandler,
     Span,
@@ -65,9 +65,9 @@ def run_mock_collector(port=4318):
 def test_span_send_with_env_vars():
     """Test that Span.send() works with environment configuration."""
     # Clear caches before test
-    miniotel._get_endpoint.cache_clear()
-    miniotel._get_resource_from_env.cache_clear()
-    miniotel._parse_headers.cache_clear()
+    picotel._get_endpoint.cache_clear()
+    picotel._get_resource_from_env.cache_clear()
+    picotel._parse_headers.cache_clear()
 
     # Clear any previous captured requests
     MockCollector.captured_requests = []
@@ -134,9 +134,9 @@ def test_span_send_with_env_vars():
 def test_send_spans_with_env_vars():
     """Test that send_spans() works with environment configuration."""
     # Clear caches before test
-    miniotel._get_endpoint.cache_clear()
-    miniotel._get_resource_from_env.cache_clear()
-    miniotel._parse_headers.cache_clear()
+    picotel._get_endpoint.cache_clear()
+    picotel._get_resource_from_env.cache_clear()
+    picotel._parse_headers.cache_clear()
 
     # Clear any previous captured requests
     MockCollector.captured_requests = []
@@ -173,7 +173,7 @@ def test_send_spans_with_env_vars():
 
             # Send without explicit endpoint - should use env vars for endpoint
             # But we need to get resource from env manually for send_spans
-            resource = miniotel._get_resource_from_env()
+            resource = picotel._get_resource_from_env()
             result = send_spans(None, resource, spans)
 
             assert result is True
@@ -199,9 +199,9 @@ def test_send_spans_with_env_vars():
 def test_log_send_with_env_vars():
     """Test that LogRecord.send() works with environment configuration."""
     # Clear caches before test
-    miniotel._get_endpoint.cache_clear()
-    miniotel._get_resource_from_env.cache_clear()
-    miniotel._parse_headers.cache_clear()
+    picotel._get_endpoint.cache_clear()
+    picotel._get_resource_from_env.cache_clear()
+    picotel._parse_headers.cache_clear()
 
     # Clear any previous captured requests
     MockCollector.captured_requests = []
@@ -260,9 +260,9 @@ def test_otlp_handler_with_env_vars():
     import logging  # noqa: PLC0415
 
     # Clear caches before test
-    miniotel._get_endpoint.cache_clear()
-    miniotel._get_resource_from_env.cache_clear()
-    miniotel._parse_headers.cache_clear()
+    picotel._get_endpoint.cache_clear()
+    picotel._get_resource_from_env.cache_clear()
+    picotel._parse_headers.cache_clear()
 
     # Clear any previous captured requests
     MockCollector.captured_requests = []
@@ -321,9 +321,9 @@ def test_otlp_handler_with_env_vars():
 def test_send_logs_with_env_vars():
     """Test that send_logs() works with environment configuration."""
     # Clear caches before test
-    miniotel._get_endpoint.cache_clear()
-    miniotel._get_resource_from_env.cache_clear()
-    miniotel._parse_headers.cache_clear()
+    picotel._get_endpoint.cache_clear()
+    picotel._get_resource_from_env.cache_clear()
+    picotel._parse_headers.cache_clear()
 
     # Clear any previous captured requests
     MockCollector.captured_requests = []
@@ -354,7 +354,7 @@ def test_send_logs_with_env_vars():
 
             # Send without explicit endpoint - should use env vars for endpoint
             # But we need to get resource from env manually for send_logs
-            resource = miniotel._get_resource_from_env()
+            resource = picotel._get_resource_from_env()
             result = send_logs(None, resource, logs)
 
             assert result is True
@@ -383,9 +383,9 @@ def test_cache_clearing():
     Per OTEL spec, general endpoint has /v1/{signal} appended.
     """
     # Clear caches
-    miniotel._get_endpoint.cache_clear()
-    miniotel._get_resource_from_env.cache_clear()
-    miniotel._parse_headers.cache_clear()
+    picotel._get_endpoint.cache_clear()
+    picotel._get_resource_from_env.cache_clear()
+    picotel._parse_headers.cache_clear()
 
     # Set initial environment
     with patch.dict(
@@ -397,9 +397,9 @@ def test_cache_clearing():
         },
     ):
         # Call functions to cache values
-        endpoint1 = miniotel._get_endpoint("traces")
-        resource1 = miniotel._get_resource_from_env()
-        headers1 = miniotel._parse_headers()
+        endpoint1 = picotel._get_endpoint("traces")
+        resource1 = picotel._get_resource_from_env()
+        headers1 = picotel._parse_headers()
 
         # General endpoint gets path appended per OTEL spec
         assert endpoint1 == "http://first:4318/v1/traces"
@@ -416,23 +416,23 @@ def test_cache_clearing():
         },
     ):
         # Should still get cached values
-        endpoint2 = miniotel._get_endpoint("traces")
-        resource2 = miniotel._get_resource_from_env()
-        headers2 = miniotel._parse_headers()
+        endpoint2 = picotel._get_endpoint("traces")
+        resource2 = picotel._get_resource_from_env()
+        headers2 = picotel._parse_headers()
 
         assert endpoint2 == "http://first:4318/v1/traces"  # Cached
         assert resource2.attributes["service.name"] == "first-service"  # Cached
         assert headers2["X-First"] == "value1"  # Cached
 
         # Now clear cache
-        miniotel._get_endpoint.cache_clear()
-        miniotel._get_resource_from_env.cache_clear()
-        miniotel._parse_headers.cache_clear()
+        picotel._get_endpoint.cache_clear()
+        picotel._get_resource_from_env.cache_clear()
+        picotel._parse_headers.cache_clear()
 
         # Should get new values
-        endpoint3 = miniotel._get_endpoint("traces")
-        resource3 = miniotel._get_resource_from_env()
-        headers3 = miniotel._parse_headers()
+        endpoint3 = picotel._get_endpoint("traces")
+        resource3 = picotel._get_resource_from_env()
+        headers3 = picotel._parse_headers()
 
         assert endpoint3 == "http://second:4318/v1/traces"  # New value
         assert resource3.attributes["service.name"] == "second-service"  # New value
@@ -442,10 +442,10 @@ def test_cache_clearing():
 def test_span_with_traceparent_sends_correct_ids():
     """Test that Span with TRACEPARENT sends correct trace_id and parent_span_id."""
     # Clear caches before test
-    miniotel._get_endpoint.cache_clear()
-    miniotel._get_resource_from_env.cache_clear()
-    miniotel._parse_headers.cache_clear()
-    miniotel._parse_traceparent.cache_clear()
+    picotel._get_endpoint.cache_clear()
+    picotel._get_resource_from_env.cache_clear()
+    picotel._parse_headers.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     MockCollector.captured_requests = []
     server = run_mock_collector(port=4324)
@@ -461,8 +461,8 @@ def test_span_with_traceparent_sends_correct_ids():
                 ),
             },
         ):
-            span = miniotel.Span(
-                trace_id=miniotel.TRACEPARENT,
+            span = picotel.Span(
+                trace_id=picotel.TRACEPARENT,
                 name="child-span",
                 start_time_ns=1000000000,
                 end_time_ns=2000000000,
@@ -491,10 +491,10 @@ def test_span_with_traceparent_sends_correct_ids():
 def test_logrecord_with_traceparent_sends_correct_ids():
     """Test that LogRecord with TRACEPARENT sends correct trace correlation."""
     # Clear caches before test
-    miniotel._get_endpoint.cache_clear()
-    miniotel._get_resource_from_env.cache_clear()
-    miniotel._parse_headers.cache_clear()
-    miniotel._parse_traceparent.cache_clear()
+    picotel._get_endpoint.cache_clear()
+    picotel._get_resource_from_env.cache_clear()
+    picotel._parse_headers.cache_clear()
+    picotel._parse_traceparent.cache_clear()
 
     MockCollector.captured_requests = []
     server = run_mock_collector(port=4325)
@@ -510,10 +510,10 @@ def test_logrecord_with_traceparent_sends_correct_ids():
                 ),
             },
         ):
-            log = miniotel.LogRecord(
+            log = picotel.LogRecord(
                 body="Log correlated via TRACEPARENT",
-                trace_id=miniotel.TRACEPARENT,
-                severity_number=miniotel.LogRecord.Severity.INFO,
+                trace_id=picotel.TRACEPARENT,
+                severity_number=picotel.LogRecord.Severity.INFO,
             )
             result = log.send()
 

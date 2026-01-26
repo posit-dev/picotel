@@ -4,7 +4,7 @@
 
 import base64
 
-from miniotel import _to_otlp_value
+from picotel import _to_otlp_value
 
 
 def test_string_value():
