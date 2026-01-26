@@ -334,3 +334,57 @@ def test_send_spans_timeout():
     # Clean up server
     server.shutdown()
     server.server_close()
+
+
+def test_send_spans_skips_invalid_trace_id():
+    """Test that spans without trace_id are skipped."""
+    from unittest.mock import patch  # noqa: PLC0415
+
+    import miniotel  # noqa: PLC0415
+
+    MockOTLPHandler.captured_requests = []
+
+    server = HTTPServer(("localhost", 0), MockOTLPHandler)
+    port = server.server_address[1]
+    server_thread = threading.Thread(target=server.handle_request)
+    server_thread.start()
+
+    resource = Resource({"service.name": "test_service"})
+
+    # Create valid and invalid spans
+    valid_span = Span(
+        trace_id=new_trace_id(),
+        name="valid_span",
+        start_time_ns=now_ns(),
+        end_time_ns=now_ns() + 1000000,
+    )
+    invalid_span = Span.__new__(Span)  # Bypass __post_init__
+    invalid_span.trace_id = ""
+    invalid_span.span_id = new_span_id()
+    invalid_span.name = "invalid_span"
+    invalid_span.start_time_ns = now_ns()
+    invalid_span.end_time_ns = now_ns() + 1000000
+    invalid_span.parent_span_id = ""
+    invalid_span.kind = Span.Kind.INTERNAL
+    invalid_span.attributes = {}
+    invalid_span.events = []
+    invalid_span.links = []
+    invalid_span.status = None
+
+    with patch.object(miniotel._logger, "error") as mock_error:
+        result = send_spans(
+            f"http://localhost:{port}", resource, [valid_span, invalid_span]
+        )
+
+    server_thread.join()
+    server.server_close()
+
+    assert result is True
+    mock_error.assert_called_once()
+    assert "1 span(s) skipped" in mock_error.call_args[0][0]
+
+    # Verify only valid span was sent
+    payload = json.loads(MockOTLPHandler.captured_requests[0]["body"])
+    spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+    assert len(spans) == 1
+    assert spans[0]["name"] == "valid_span"

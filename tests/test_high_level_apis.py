@@ -387,3 +387,171 @@ class TestOTLPHandler:
 
             finally:
                 logger.removeHandler(handler)
+
+
+class TestSpanSendMethod:
+    """Tests for Span.send() method."""
+
+    def test_span_send_with_explicit_params(self):
+        """Test Span.send() with explicit parameters."""
+        resource = Resource({"service.name": "test_service"})
+        trace_id = new_trace_id()
+        span_id = new_span_id()
+
+        with patch("miniotel.send_spans") as mock_send:
+            mock_send.return_value = True
+
+            span = Span(
+                trace_id=trace_id,
+                span_id=span_id,
+                name="test_span",
+                start_time_ns=1000,
+                end_time_ns=2000,
+            )
+
+            result = span.send(
+                endpoint="http://localhost:4318",
+                resource=resource,
+                scope=InstrumentationScope("test", "1.0"),
+                timeout=5.0,
+            )
+
+            assert result is True
+            mock_send.assert_called_once()
+            call_args = mock_send.call_args
+            assert call_args[0][0] == "http://localhost:4318"
+            assert call_args[0][1] == resource
+            assert len(call_args[0][2]) == 1
+            assert call_args[0][2][0] == span
+
+    def test_span_send_with_env_vars(self):
+        """Test Span.send() uses environment variables when parameters are None."""
+        import miniotel
+
+        # Clear caches before test
+        miniotel._get_endpoint.cache_clear()
+        miniotel._get_resource_from_env.cache_clear()
+
+        with patch("miniotel.send_spans") as mock_send:
+            mock_send.return_value = True
+
+            with patch("miniotel._get_endpoint") as mock_endpoint:
+                mock_endpoint.return_value = "http://env:4318"
+                with patch("miniotel._get_resource_from_env") as mock_resource:
+                    test_resource = Resource({"service.name": "env_service"})
+                    mock_resource.return_value = test_resource
+
+                    span = Span(
+                        trace_id=new_trace_id(),
+                        span_id=new_span_id(),
+                        name="test_span",
+                        start_time_ns=1000,
+                        end_time_ns=2000,
+                    )
+
+                    result = span.send()
+
+                    assert result is True
+                    mock_send.assert_called_once()
+                    call_args = mock_send.call_args
+                    assert call_args[0][0] == "http://env:4318"
+                    assert call_args[0][1] == test_resource
+
+    def test_span_send_fails_without_config(self):
+        """Test Span.send() returns False when no config is available."""
+        import miniotel
+
+        # Clear caches before test
+        miniotel._get_endpoint.cache_clear()
+        miniotel._get_resource_from_env.cache_clear()
+
+        with patch("miniotel._get_endpoint") as mock_endpoint:
+            mock_endpoint.return_value = None
+            with patch("miniotel._get_resource_from_env") as mock_resource:
+                mock_resource.return_value = None
+
+                span = Span(
+                    trace_id=new_trace_id(),
+                    span_id=new_span_id(),
+                    name="test_span",
+                    start_time_ns=1000,
+                    end_time_ns=2000,
+                )
+
+                result = span.send()
+
+                assert result is False
+
+
+class TestLogRecordSendMethod:
+    """Tests for LogRecord.send() method."""
+
+    def test_log_send_with_explicit_params(self):
+        """Test LogRecord.send() with explicit parameters."""
+        resource = Resource({"service.name": "test_service"})
+
+        with patch("miniotel.send_logs") as mock_send:
+            mock_send.return_value = True
+
+            log = LogRecord(body="test log message")
+
+            result = log.send(
+                endpoint="http://localhost:4318",
+                resource=resource,
+                scope=InstrumentationScope("test", "1.0"),
+                timeout=5.0,
+            )
+
+            assert result is True
+            mock_send.assert_called_once()
+            call_args = mock_send.call_args
+            assert call_args[0][0] == "http://localhost:4318"
+            assert call_args[0][1] == resource
+            assert len(call_args[0][2]) == 1
+            assert call_args[0][2][0] == log
+
+    def test_log_send_with_env_vars(self):
+        """Test LogRecord.send() uses environment variables when parameters are None."""
+        import miniotel
+
+        # Clear caches before test
+        miniotel._get_endpoint.cache_clear()
+        miniotel._get_resource_from_env.cache_clear()
+
+        with patch("miniotel.send_logs") as mock_send:
+            mock_send.return_value = True
+
+            with patch("miniotel._get_endpoint") as mock_endpoint:
+                mock_endpoint.return_value = "http://env:4318"
+                with patch("miniotel._get_resource_from_env") as mock_resource:
+                    test_resource = Resource({"service.name": "env_service"})
+                    mock_resource.return_value = test_resource
+
+                    log = LogRecord(body="test log message")
+
+                    result = log.send()
+
+                    assert result is True
+                    mock_send.assert_called_once()
+                    call_args = mock_send.call_args
+                    assert call_args[0][0] == "http://env:4318"
+                    assert call_args[0][1] == test_resource
+
+    def test_log_send_fails_without_config(self):
+        """Test LogRecord.send() returns False when no config is available."""
+        import miniotel
+
+        # Clear caches before test
+        miniotel._get_endpoint.cache_clear()
+        miniotel._get_resource_from_env.cache_clear()
+
+        with patch("miniotel._get_endpoint") as mock_endpoint:
+            mock_endpoint.return_value = None
+            with patch("miniotel._get_resource_from_env") as mock_resource:
+                mock_resource.return_value = None
+
+                log = LogRecord(body="test log message")
+
+                result = log.send()
+
+                assert result is False

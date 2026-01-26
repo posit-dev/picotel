@@ -36,6 +36,9 @@ from typing import Any
 
 _logger = logging.getLogger("miniotel")
 
+# Sentinel to read trace_id/parent_span_id from TRACEPARENT env var (W3C Trace Context)
+TRACEPARENT = object()
+
 
 def new_trace_id() -> str:
     """Generate a random 16-byte trace ID as a 32-character lowercase hex string."""
@@ -102,6 +105,10 @@ class Span:
             # do work
             span.attributes["status"] = "success"
         # span is automatically sent on exit
+
+    To continue a trace from TRACEPARENT env var, pass the TRACEPARENT sentinel::
+
+        span = Span(trace_id=TRACEPARENT, name="child-op", ...)
     """
 
     class Kind(IntEnum):
@@ -140,7 +147,7 @@ class Span:
         span_id: str
         attributes: dict[str, Any] = field(default_factory=dict)
 
-    trace_id: str
+    trace_id: str | object  # Can be TRACEPARENT sentinel
     name: str
     start_time_ns: int
     end_time_ns: int
@@ -155,6 +162,18 @@ class Span:
     endpoint: str = ""
     resource: Resource | None = None
     scope: InstrumentationScope | None = None
+
+    def __post_init__(self) -> None:
+        """Handle TRACEPARENT sentinel for trace_id and parent_span_id."""
+        if self.trace_id is TRACEPARENT:
+            traceparent = _parse_traceparent()
+            if traceparent is None:
+                _logger.error("TRACEPARENT requested but env var not set or invalid")
+                self.trace_id = ""
+                return
+            self.trace_id = traceparent[0]
+            if not self.parent_span_id:
+                self.parent_span_id = traceparent[1]
 
     def __enter__(self) -> Span:
         """Enter the context manager, setting start_time_ns if not already set."""
@@ -220,12 +239,24 @@ class LogRecord:
     body: Any
     timestamp_ns: int = 0
     observed_timestamp_ns: int = 0
-    trace_id: str = ""
+    trace_id: str | object = ""  # Can be TRACEPARENT sentinel
     span_id: str = ""
     trace_flags: int = 0
     severity_number: int = Severity.INFO
     severity_text: str = ""
     attributes: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Handle TRACEPARENT sentinel for trace_id and span_id."""
+        if self.trace_id is TRACEPARENT:
+            traceparent = _parse_traceparent()
+            if traceparent is None:
+                _logger.error("TRACEPARENT requested but env var not set or invalid")
+                self.trace_id = ""
+                return
+            self.trace_id = traceparent[0]
+            if not self.span_id:
+                self.span_id = traceparent[1]
 
     def send(
         self,
@@ -438,8 +469,11 @@ def send_spans(
     else:
         url = endpoint.rstrip("/") + "/v1/traces"
 
-    # Build the ExportTraceServiceRequest payload
-    scope_span_dict: dict[str, Any] = {"spans": [_span_to_dict(span) for span in spans]}
+    # Build the ExportTraceServiceRequest payload (skip spans without trace_id)
+    span_dicts = [_span_to_dict(s) for s in spans if s.trace_id]
+    if (skipped := len(spans) - len(span_dicts)) > 0:
+        _logger.error(f"{skipped} span(s) skipped: missing trace_id")
+    scope_span_dict: dict[str, Any] = {"spans": span_dicts}
     if scope:
         scope_dict: dict[str, Any] = {"name": scope.name, "version": scope.version}
         if scope.attributes:
@@ -571,7 +605,7 @@ def send_logs(
 # -----------------------------------------------------------------------------
 
 
-@functools.cache
+@functools.lru_cache(maxsize=None)
 def _get_endpoint(signal: str = "traces") -> str | None:
     """Get the full OTLP endpoint URL from environment variables.
 
@@ -600,7 +634,7 @@ def _get_endpoint(signal: str = "traces") -> str | None:
     return None
 
 
-@functools.cache
+@functools.lru_cache(maxsize=None)
 def _parse_headers() -> dict[str, str]:
     """Parse OTEL_EXPORTER_OTLP_HEADERS environment variable.
 
@@ -619,7 +653,7 @@ def _parse_headers() -> dict[str, str]:
     return headers
 
 
-@functools.cache
+@functools.lru_cache(maxsize=None)
 def _get_resource_from_env() -> Resource | None:
     """Create a Resource from OTEL_SERVICE_NAME environment variable.
 
@@ -628,6 +662,42 @@ def _get_resource_from_env() -> Resource | None:
     if service_name := os.environ.get("OTEL_SERVICE_NAME"):
         return Resource({"service.name": service_name})
     return None
+
+
+@functools.lru_cache(maxsize=None)
+def _parse_traceparent() -> tuple[str, str, int] | None:
+    """Parse the TRACEPARENT environment variable.
+
+    Format: {version}-{trace-id}-{parent-id}-{trace-flags}
+    Example: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01
+
+    Returns (trace_id, parent_id, trace_flags) or None if not set/invalid.
+    """
+    traceparent = os.environ.get("TRACEPARENT", "")
+    if not traceparent:
+        return None
+
+    parts = traceparent.split("-")
+    if len(parts) != 4 or parts[0] != "00":  # noqa: PLR2004
+        return None
+
+    _, trace_id, parent_id, trace_flags_str = parts
+    hex_chars = set("0123456789abcdefABCDEF")
+
+    if not (
+        len(trace_id) == 32  # noqa: PLR2004
+        and len(parent_id) == 16  # noqa: PLR2004
+        and len(trace_flags_str) == 2  # noqa: PLR2004
+        and all(c in hex_chars for c in trace_id + parent_id + trace_flags_str)
+    ):
+        return None
+
+    try:
+        trace_flags = int(trace_flags_str, 16)
+    except ValueError:
+        return None
+
+    return (trace_id, parent_id, trace_flags)
 
 
 def _to_otlp_value(value: Any) -> dict[str, Any]:  # noqa: ANN401, PLR0911

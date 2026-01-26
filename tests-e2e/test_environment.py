@@ -3,7 +3,7 @@
 """End-to-end tests for environment variable configuration.
 
 These tests verify that spans and logs can be sent using environment
-variables for configuration, and that functools.cache works correctly.
+variables for configuration, and that lru_cache works correctly.
 """
 
 import json
@@ -439,6 +439,101 @@ def test_cache_clearing():
         assert headers3["X-Second"] == "value2"  # New value
 
 
+def test_span_with_traceparent_sends_correct_ids():
+    """Test that Span with TRACEPARENT sends correct trace_id and parent_span_id."""
+    # Clear caches before test
+    miniotel._get_endpoint.cache_clear()
+    miniotel._get_resource_from_env.cache_clear()
+    miniotel._parse_headers.cache_clear()
+    miniotel._parse_traceparent.cache_clear()
+
+    MockCollector.captured_requests = []
+    server = run_mock_collector(port=4324)
+
+    try:
+        with patch.dict(
+            os.environ,
+            {
+                "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4324",
+                "OTEL_SERVICE_NAME": "traceparent-test",
+                "TRACEPARENT": (
+                    "00-abcdef1234567890abcdef1234567890-fedcba0987654321-01"
+                ),
+            },
+        ):
+            span = miniotel.Span(
+                trace_id=miniotel.TRACEPARENT,
+                name="child-span",
+                start_time_ns=1000000000,
+                end_time_ns=2000000000,
+            )
+            result = span.send()
+
+            assert result is True
+            sleep(0.1)
+
+            assert len(MockCollector.captured_requests) == 1
+            request = MockCollector.captured_requests[0]
+
+            # Verify the span has the correct trace_id from TRACEPARENT
+            body = request["body"]
+            spans = body["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            assert len(spans) == 1
+            assert spans[0]["traceId"] == "abcdef1234567890abcdef1234567890"
+            assert spans[0]["parentSpanId"] == "fedcba0987654321"
+            assert spans[0]["name"] == "child-span"
+            # span_id should be auto-generated, not the parent from TRACEPARENT
+            assert spans[0]["spanId"] != "fedcba0987654321"
+    finally:
+        server.shutdown()
+
+
+def test_logrecord_with_traceparent_sends_correct_ids():
+    """Test that LogRecord with TRACEPARENT sends correct trace correlation."""
+    # Clear caches before test
+    miniotel._get_endpoint.cache_clear()
+    miniotel._get_resource_from_env.cache_clear()
+    miniotel._parse_headers.cache_clear()
+    miniotel._parse_traceparent.cache_clear()
+
+    MockCollector.captured_requests = []
+    server = run_mock_collector(port=4325)
+
+    try:
+        with patch.dict(
+            os.environ,
+            {
+                "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4325",
+                "OTEL_SERVICE_NAME": "traceparent-log-test",
+                "TRACEPARENT": (
+                    "00-11111111222222223333333344444444-aaaabbbbccccdddd-00"
+                ),
+            },
+        ):
+            log = miniotel.LogRecord(
+                body="Log correlated via TRACEPARENT",
+                trace_id=miniotel.TRACEPARENT,
+                severity_number=miniotel.LogRecord.Severity.INFO,
+            )
+            result = log.send()
+
+            assert result is True
+            sleep(0.1)
+
+            assert len(MockCollector.captured_requests) == 1
+            request = MockCollector.captured_requests[0]
+
+            # Verify the log has the correct trace correlation from TRACEPARENT
+            body = request["body"]
+            logs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+            assert len(logs) == 1
+            assert logs[0]["traceId"] == "11111111222222223333333344444444"
+            assert logs[0]["spanId"] == "aaaabbbbccccdddd"
+            assert logs[0]["body"]["stringValue"] == "Log correlated via TRACEPARENT"
+    finally:
+        server.shutdown()
+
+
 if __name__ == "__main__":
     # Run tests if executed directly
     test_span_send_with_env_vars()
@@ -447,4 +542,6 @@ if __name__ == "__main__":
     test_otlp_handler_with_env_vars()
     test_send_logs_with_env_vars()
     test_cache_clearing()
+    test_span_with_traceparent_sends_correct_ids()
+    test_logrecord_with_traceparent_sends_correct_ids()
     print("All e2e environment tests passed!")  # noqa: T201

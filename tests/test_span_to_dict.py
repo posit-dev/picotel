@@ -171,14 +171,18 @@ def test_span_with_links():
     }
 
 
-def test_span_with_error_status():
-    """Create span with ERROR status, verify status object is correct."""
+def test_span_status_codes():
+    """Test all span status codes are correctly mapped to OTLP format.
+
+    Combines tests for OK, ERROR, and UNSET statuses into a single comprehensive test.
+    """
     trace_id = new_trace_id()
     span_id = new_span_id()
     start_time = now_ns()
     end_time = start_time + 1000000
 
-    span = Span(
+    # Test ERROR status
+    span_error = Span(
         trace_id=trace_id,
         span_id=span_id,
         name="failed_operation",
@@ -186,21 +190,12 @@ def test_span_with_error_status():
         end_time_ns=end_time,
         status=Span.Status.ERROR,
     )
-
-    result = _span_to_dict(span)
-
+    result = _span_to_dict(span_error)
     assert "status" in result
     assert result["status"]["code"] == 2  # Span.Status.ERROR
 
-
-def test_span_with_ok_status():
-    """Test span with OK status."""
-    trace_id = new_trace_id()
-    span_id = new_span_id()
-    start_time = now_ns()
-    end_time = start_time + 1000000
-
-    span = Span(
+    # Test OK status
+    span_ok = Span(
         trace_id=trace_id,
         span_id=span_id,
         name="successful_operation",
@@ -208,21 +203,12 @@ def test_span_with_ok_status():
         end_time_ns=end_time,
         status=Span.Status.OK,
     )
-
-    result = _span_to_dict(span)
-
+    result = _span_to_dict(span_ok)
     assert "status" in result
     assert result["status"]["code"] == 1  # Span.Status.OK
 
-
-def test_span_with_unset_status():
-    """Test that UNSET status is omitted from output."""
-    trace_id = new_trace_id()
-    span_id = new_span_id()
-    start_time = now_ns()
-    end_time = start_time + 1000000
-
-    span = Span(
+    # Test UNSET status (should be omitted)
+    span_unset = Span(
         trace_id=trace_id,
         span_id=span_id,
         name="operation",
@@ -230,11 +216,8 @@ def test_span_with_unset_status():
         end_time_ns=end_time,
         status=Span.Status.UNSET,
     )
-
-    result = _span_to_dict(span)
-
-    # UNSET status should be omitted
-    assert "status" not in result
+    result = _span_to_dict(span_unset)
+    assert "status" not in result  # UNSET status should be omitted
 
 
 def test_span_with_empty_events_and_links():
