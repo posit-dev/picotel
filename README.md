@@ -61,6 +61,35 @@ log = LogRecord(
 send_logs("http://localhost:4318", resource, [log])
 ```
 
+## Environment Variables
+
+miniotel supports standard OpenTelemetry environment variables:
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT` - Base collector URL (e.g., `http://localhost:4318`). Path `/v1/traces` or `/v1/logs` is appended automatically.
+- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` - Traces endpoint (used as-is, no path appended)
+- `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` - Logs endpoint (used as-is, no path appended)
+- `OTEL_EXPORTER_OTLP_HEADERS` - Custom headers (`key1=value1,key2=value2`)
+- `OTEL_SERVICE_NAME` - Service name for auto-created Resource
+
+When environment variables are configured, you can omit the endpoint and resource:
+
+```python
+# With OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_SERVICE_NAME set:
+with Span(trace_id=new_trace_id(), name="my-op", start_time_ns=0, end_time_ns=0):
+    pass  # Span sent automatically on exit
+```
+
+## Disabling Telemetry
+
+To disable telemetry, simply don't set the OTEL environment variables. When not configured, miniotel will log warnings and return `False` from send functions.
+
+To silence the warnings:
+
+```python
+import logging
+logging.getLogger("miniotel").setLevel(logging.ERROR)
+```
+
 ## Non-Goals
 
 - gRPC/Protobuf support (HTTP/JSON only)

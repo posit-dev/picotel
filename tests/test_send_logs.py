@@ -246,12 +246,12 @@ class TestSendLogs:
                 "http://localhost:4318/v1/logs", 500, "Internal Server Error", {}, None
             )
 
-            with patch("miniotel.logging.warning") as mock_warning:
+            with patch("miniotel._logger.error") as mock_error:
                 result = send_logs("http://localhost:4318", resource, logs)
 
         assert result is False
-        mock_warning.assert_called_once()
-        assert "Failed to send logs" in mock_warning.call_args[0][0]
+        mock_error.assert_called_once()
+        assert "Failed to send logs" in mock_error.call_args[0][0]
 
     def test_send_logs_network_error(self):
         """Test handling of network errors during log export."""
@@ -261,12 +261,12 @@ class TestSendLogs:
         with patch("miniotel.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = OSError("Connection refused")
 
-            with patch("miniotel.logging.warning") as mock_warning:
+            with patch("miniotel._logger.error") as mock_error:
                 result = send_logs("http://localhost:4318", resource, logs)
 
         assert result is False
-        mock_warning.assert_called_once()
-        assert "Failed to send logs" in mock_warning.call_args[0][0]
+        mock_error.assert_called_once()
+        assert "Failed to send logs" in mock_error.call_args[0][0]
 
     def test_send_empty_logs_list(self):
         """Test sending an empty list of logs."""

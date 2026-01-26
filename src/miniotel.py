@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
 
+_logger = logging.getLogger("miniotel")
+
 
 def new_trace_id() -> str:
     """Generate a random 16-byte trace ID as a 32-character lowercase hex string."""
@@ -191,7 +193,7 @@ class Span:
             resource = _get_resource_from_env()
 
         if endpoint is None or resource is None:
-            logging.warning("Missing endpoint or resource for span.send()")
+            _logger.warning("span not sent, missing endpoint or resource")
             return False
 
         return send_spans(endpoint, resource, [self], scope, timeout)
@@ -246,7 +248,7 @@ class LogRecord:
             resource = _get_resource_from_env()
 
         if endpoint is None or resource is None:
-            logging.warning("Missing endpoint or resource for log.send()")
+            _logger.warning("log not sent, missing endpoint or resource")
             return False
 
         return send_logs(endpoint, resource, [self], scope, timeout)
@@ -431,7 +433,7 @@ def send_spans(
     if endpoint is None:
         url = _get_endpoint("traces")
         if url is None:
-            logging.warning("No endpoint provided and no OTEL env vars set")
+            _logger.warning("endpoint not configured, spans not sent")
             return False
     else:
         url = endpoint.rstrip("/") + "/v1/traces"
@@ -467,7 +469,7 @@ def send_spans(
             return response.status == 200  # noqa: PLR2004
     except (urllib.error.URLError, OSError) as e:
         # Log the error but don't raise - telemetry shouldn't crash the app
-        logging.warning(f"Failed to send spans to {url}: {e}")
+        _logger.error(f"Failed to send spans to {url}: {e}")  # noqa: TRY400
         return False
 
 
@@ -524,7 +526,7 @@ def send_logs(
     if endpoint is None:
         url = _get_endpoint("logs")
         if url is None:
-            logging.warning("No endpoint provided and no OTEL env vars set")
+            _logger.warning("endpoint not configured, logs not sent")
             return False
     else:
         url = endpoint.rstrip("/") + "/v1/logs"
@@ -560,7 +562,7 @@ def send_logs(
             return response.status == 200  # noqa: PLR2004
     except (urllib.error.URLError, OSError) as e:
         # Log the error but don't raise - telemetry shouldn't crash the app
-        logging.warning(f"Failed to send logs to {url}: {e}")
+        _logger.error(f"Failed to send logs to {url}: {e}")  # noqa: TRY400
         return False
 
 
