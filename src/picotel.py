@@ -643,7 +643,7 @@ def _parse_headers() -> dict[str, str]:
     """
     headers_str = os.environ.get(
         "PICOTEL_EXPORTER_OTLP_HEADERS",
-        os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
+        os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", ""),
     )
     if not headers_str:
         return {}
