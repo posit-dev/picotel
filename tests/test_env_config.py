@@ -145,6 +145,125 @@ def test_get_resource_from_env():
         assert picotel._get_resource_from_env() is None
 
 
+def test_picotel_endpoint_takes_precedence_over_otel():
+    """Test that PICOTEL_EXPORTER_OTLP_ENDPOINT takes precedence over OTEL."""
+    picotel._get_endpoint.cache_clear()
+
+    with patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel:4318",
+            "PICOTEL_EXPORTER_OTLP_ENDPOINT": "http://picotel:4318",
+        },
+    ):
+        assert picotel._get_endpoint("traces") == "http://picotel:4318/v1/traces"
+        picotel._get_endpoint.cache_clear()
+        assert picotel._get_endpoint("logs") == "http://picotel:4318/v1/logs"
+
+
+def test_picotel_traces_endpoint_takes_precedence():
+    """Test PICOTEL_EXPORTER_OTLP_TRACES_ENDPOINT wins over all OTEL variants."""
+    picotel._get_endpoint.cache_clear()
+
+    with patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-general:4318",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://otel-traces:4318",
+            "PICOTEL_EXPORTER_OTLP_ENDPOINT": "http://picotel-general:4318",
+            "PICOTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://picotel-traces:4318",
+        },
+    ):
+        assert picotel._get_endpoint("traces") == "http://picotel-traces:4318"
+
+
+def test_picotel_logs_endpoint_takes_precedence():
+    """Test PICOTEL_EXPORTER_OTLP_LOGS_ENDPOINT wins over all OTEL variants."""
+    picotel._get_endpoint.cache_clear()
+
+    with patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-general:4318",
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://otel-logs:4318",
+            "PICOTEL_EXPORTER_OTLP_ENDPOINT": "http://picotel-general:4318",
+            "PICOTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://picotel-logs:4318",
+        },
+    ):
+        assert picotel._get_endpoint("logs") == "http://picotel-logs:4318"
+
+
+def test_picotel_general_wins_over_otel_specific():
+    """Test PICOTEL general endpoint wins over OTEL signal-specific.
+
+    All PICOTEL vars take precedence over all OTEL vars.
+    """
+    picotel._get_endpoint.cache_clear()
+
+    with patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://otel-traces:4318",
+            "PICOTEL_EXPORTER_OTLP_ENDPOINT": "http://picotel:4318",
+        },
+    ):
+        assert picotel._get_endpoint("traces") == "http://picotel:4318/v1/traces"
+
+
+def test_picotel_headers_takes_precedence():
+    """Test PICOTEL_EXPORTER_OTLP_HEADERS wins over OTEL."""
+    picotel._parse_headers.cache_clear()
+
+    with patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_HEADERS": "X-Otel=otel-value",
+            "PICOTEL_EXPORTER_OTLP_HEADERS": "X-Picotel=picotel-value",
+        },
+    ):
+        headers = picotel._parse_headers()
+        assert headers == {"X-Picotel": "picotel-value"}
+        assert "X-Otel" not in headers
+
+
+def test_picotel_headers_fallback_to_otel():
+    """Test fallback to OTEL headers when PICOTEL not set."""
+    picotel._parse_headers.cache_clear()
+
+    with patch.dict(
+        os.environ,
+        {"OTEL_EXPORTER_OTLP_HEADERS": "X-Otel=otel-value"},
+    ):
+        headers = picotel._parse_headers()
+        assert headers == {"X-Otel": "otel-value"}
+
+
+def test_picotel_service_name_takes_precedence():
+    """Test PICOTEL_SERVICE_NAME wins over OTEL_SERVICE_NAME."""
+    picotel._get_resource_from_env.cache_clear()
+
+    with patch.dict(
+        os.environ,
+        {
+            "OTEL_SERVICE_NAME": "otel-service",
+            "PICOTEL_SERVICE_NAME": "picotel-service",
+        },
+    ):
+        resource = picotel._get_resource_from_env()
+        assert resource is not None
+        assert resource.attributes == {"service.name": "picotel-service"}
+
+
+def test_picotel_service_name_fallback_to_otel():
+    """Test fallback to OTEL_SERVICE_NAME when PICOTEL not set."""
+    picotel._get_resource_from_env.cache_clear()
+
+    with patch.dict(os.environ, {"OTEL_SERVICE_NAME": "otel-service"}):
+        resource = picotel._get_resource_from_env()
+        assert resource is not None
+        assert resource.attributes == {"service.name": "otel-service"}
+
+
 def test_send_spans_with_env_endpoint(monkeypatch):
     """Test send_spans uses environment variable when endpoint is None."""
     # Clear caches before test

@@ -615,33 +615,35 @@ def _get_endpoint(signal: str = "traces") -> str | None:
     :param signal: The signal type - "traces" or "logs"
 
     Environment variables checked (in order):
+    - PICOTEL_EXPORTER_OTLP_TRACES_ENDPOINT / PICOTEL_EXPORTER_OTLP_LOGS_ENDPOINT (as-is)
+    - PICOTEL_EXPORTER_OTLP_ENDPOINT (with /v1/{signal} appended)
     - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_LOGS_ENDPOINT (as-is)
     - OTEL_EXPORTER_OTLP_ENDPOINT (with /v1/{signal} appended)
     """
-    # Check signal-specific endpoint first - use as-is per OTEL spec
-    if signal == "traces" and (
-        specific := os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-    ):
-        return specific
-    if signal == "logs" and (
-        specific := os.environ.get("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
-    ):
-        return specific
 
-    # Fall back to general endpoint - append signal path per OTEL spec
-    if base := os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
-        return base.rstrip("/") + f"/v1/{signal}"
-    return None
+    def for_prefix(prefix: str) -> str | None:
+        signal_var = f"{prefix}_EXPORTER_OTLP_{signal.upper()}_ENDPOINT"
+        if specific := os.environ.get(signal_var):
+            return specific
+        general_var = f"{prefix}_EXPORTER_OTLP_ENDPOINT"
+        if base := os.environ.get(general_var):
+            return base.rstrip("/") + f"/v1/{signal}"
+        return None
+
+    return for_prefix("PICOTEL") or for_prefix("OTEL")
 
 
 @functools.lru_cache(maxsize=None)
 def _parse_headers() -> dict[str, str]:
-    """Parse OTEL_EXPORTER_OTLP_HEADERS environment variable.
+    """Parse headers from environment variable.
 
+    Checks PICOTEL_EXPORTER_OTLP_HEADERS first, falls back to OTEL_EXPORTER_OTLP_HEADERS.
     Format: key1=value1,key2=value2
     Returns empty dict if not set or invalid.
     """
-    headers_str = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
+    headers_str = os.environ.get(
+        "PICOTEL_EXPORTER_OTLP_HEADERS", os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
+    )
     if not headers_str:
         return {}
 
@@ -655,11 +657,14 @@ def _parse_headers() -> dict[str, str]:
 
 @functools.lru_cache(maxsize=None)
 def _get_resource_from_env() -> Resource | None:
-    """Create a Resource from OTEL_SERVICE_NAME environment variable.
+    """Create a Resource from service name environment variable.
 
+    Checks PICOTEL_SERVICE_NAME first, falls back to OTEL_SERVICE_NAME.
     Returns None if not set.
     """
-    if service_name := os.environ.get("OTEL_SERVICE_NAME"):
+    if service_name := os.environ.get(
+        "PICOTEL_SERVICE_NAME", os.environ.get("OTEL_SERVICE_NAME")
+    ):
         return Resource({"service.name": service_name})
     return None
 
