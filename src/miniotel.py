@@ -22,6 +22,7 @@ License: MIT
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import logging
 import os
@@ -84,10 +85,15 @@ class Span:
     Spans can be nested to form a tree structure representing the call hierarchy.
     A root span has no parent_span_id; child spans reference their parent.
 
-    Can be used as a context manager to automatically set times and send the span::
+    Can be used as a context manager to automatically set times and send the span.
+    When using as context manager, start_time_ns and end_time_ns can be 0 and will
+    be set automatically::
 
         with Span(
+            trace_id=new_trace_id(),
             name="process_request",
+            start_time_ns=0,
+            end_time_ns=0,
             endpoint="http://localhost:4318",
             resource=Resource({"service.name": "myapp"}),
         ) as span:
@@ -133,10 +139,10 @@ class Span:
         attributes: dict[str, Any] = field(default_factory=dict)
 
     trace_id: str
-    span_id: str
     name: str
     start_time_ns: int
     end_time_ns: int
+    span_id: str = field(default_factory=new_span_id)
     parent_span_id: str = ""
     kind: Kind = Kind.INTERNAL
     attributes: dict[str, Any] = field(default_factory=dict)
@@ -158,17 +164,36 @@ class Span:
         """Exit the context manager, setting end_time_ns and sending the span."""
         if self.end_time_ns == 0:
             self.end_time_ns = now_ns()
-        if self.endpoint and self.resource:
-            send_spans(self.endpoint, self.resource, [self], self.scope)
+        # Try to send if we have endpoint (explicit or from env) and resource
+        endpoint = self.endpoint or None  # Let send_spans handle env vars
+        resource = self.resource or _get_resource_from_env()
+        if (endpoint or _get_endpoint("traces")) and resource:
+            send_spans(endpoint, resource, [self], self.scope)
 
     def send(
         self,
-        endpoint: str,
-        resource: Resource,
+        endpoint: str | None = None,
+        resource: Resource | None = None,
         scope: InstrumentationScope | None = None,
         timeout: float = 10.0,
     ) -> bool:
-        """Send this span to an OTLP collector over HTTP."""
+        """Send this span to an OTLP collector over HTTP.
+
+        :param endpoint: OTLP collector URL. If None, uses env vars
+        :param resource: Resource attributes. If None, uses env vars
+        :param scope: Optional instrumentation scope metadata
+        :param timeout: HTTP request timeout in seconds (default 10.0)
+        """
+        # Use environment variables if not provided
+        if endpoint is None:
+            endpoint = _get_endpoint("traces")
+        if resource is None:
+            resource = _get_resource_from_env()
+
+        if endpoint is None or resource is None:
+            logging.warning("Missing endpoint or resource for span.send()")
+            return False
+
         return send_spans(endpoint, resource, [self], scope, timeout)
 
 
@@ -202,12 +227,28 @@ class LogRecord:
 
     def send(
         self,
-        endpoint: str,
-        resource: Resource,
+        endpoint: str | None = None,
+        resource: Resource | None = None,
         scope: InstrumentationScope | None = None,
         timeout: float = 10.0,
     ) -> bool:
-        """Send this log record to an OTLP collector over HTTP."""
+        """Send this log record to an OTLP collector over HTTP.
+
+        :param endpoint: OTLP collector URL. If None, uses env vars
+        :param resource: Resource attributes. If None, uses env vars
+        :param scope: Optional instrumentation scope metadata
+        :param timeout: HTTP request timeout in seconds (default 10.0)
+        """
+        # Use environment variables if not provided
+        if endpoint is None:
+            endpoint = _get_endpoint("logs")
+        if resource is None:
+            resource = _get_resource_from_env()
+
+        if endpoint is None or resource is None:
+            logging.warning("Missing endpoint or resource for log.send()")
+            return False
+
         return send_logs(endpoint, resource, [self], scope, timeout)
 
 
@@ -243,17 +284,17 @@ class OTLPHandler(logging.Handler):
 
     def __init__(
         self,
-        endpoint: str,
-        resource: Resource,
+        endpoint: str | None = None,
+        resource: Resource | None = None,
         scope: InstrumentationScope | None = None,
         level: int = logging.NOTSET,
     ) -> None:
         """Initialize the OTLP handler.
 
-        :param str endpoint: Base URL of the OTLP collector (e.g., "http://localhost:4318")
-        :param Resource resource: Resource attributes describing the service
-        :param InstrumentationScope scope: Optional instrumentation scope metadata
-        :param int level: Minimum log level to export (default: NOTSET exports all)
+        :param endpoint: OTLP collector URL. If None, uses env vars
+        :param resource: Resource attrs. If None, uses OTEL_SERVICE_NAME
+        :param scope: Optional instrumentation scope metadata
+        :param level: Minimum log level to export (default: NOTSET exports all)
         """
         super().__init__(level)
         self.endpoint = endpoint
@@ -306,7 +347,11 @@ class OTLPHandler(logging.Handler):
                 attributes=attributes,
             )
 
-            send_logs(self.endpoint, self.resource, [log], self.scope)
+            # Use environment variables if not set in constructor
+            endpoint = self.endpoint or None  # Let send_logs handle env vars
+            resource = self.resource or _get_resource_from_env()
+            if (endpoint or _get_endpoint("logs")) and resource:
+                send_logs(endpoint, resource, [log], self.scope)
         except Exception:
             # Don't let logging errors crash the application
             sys.stderr.write("miniotel: failed to send log\n")
@@ -319,7 +364,7 @@ class OTLPHandler(logging.Handler):
 
 
 def send_spans(
-    endpoint: str,
+    endpoint: str | None,
     resource: Resource,
     spans: list[Span],
     scope: InstrumentationScope | None = None,
@@ -331,7 +376,8 @@ def send_spans(
     Returns True on successful transmission (HTTP 200), False on any error.
     Errors are logged as warnings but not raised to avoid disrupting the application.
 
-    :param str endpoint: Base URL of the OTLP collector (e.g., "http://localhost:4318")
+    :param str | None endpoint: OTLP collector URL. If None, uses env vars
+                                 (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or OTEL_ENDPOINT)
     :param Resource resource: Resource attributes describing the service
     :param list[Span] spans: List of spans to send
     :param InstrumentationScope scope: Optional instrumentation scope metadata
@@ -381,8 +427,16 @@ def send_spans(
         send_spans("http://localhost:4318", resource, [http_span, db_span])
 
     """
+    # Build the URL - env vars return full URL, explicit endpoint needs path appended
+    if endpoint is None:
+        url = _get_endpoint("traces")
+        if url is None:
+            logging.warning("No endpoint provided and no OTEL env vars set")
+            return False
+    else:
+        url = endpoint.rstrip("/") + "/v1/traces"
+
     # Build the ExportTraceServiceRequest payload
-    # Build scope dict separately for clarity
     scope_span_dict: dict[str, Any] = {"spans": [_span_to_dict(span) for span in spans]}
     if scope:
         scope_dict: dict[str, Any] = {"name": scope.name, "version": scope.version}
@@ -398,10 +452,9 @@ def send_spans(
             }
         ]
     }
-
-    # Prepare the HTTP request
-    url = endpoint.rstrip("/") + "/v1/traces"
     headers = {"Content-Type": "application/json"}
+    # Add headers from environment if configured
+    headers.update(_parse_headers())
     data = json.dumps(payload).encode("utf-8")
 
     try:
@@ -419,7 +472,7 @@ def send_spans(
 
 
 def send_logs(
-    endpoint: str,
+    endpoint: str | None,
     resource: Resource,
     logs: list[LogRecord],
     scope: InstrumentationScope | None = None,
@@ -431,7 +484,8 @@ def send_logs(
     Returns True on successful transmission (HTTP 200), False on any error.
     Errors are logged as warnings but not raised to avoid disrupting the application.
 
-    :param str endpoint: Base URL of the OTLP collector (e.g., "http://localhost:4318")
+    :param str | None endpoint: OTLP collector URL. If None, uses env vars
+                                 (OTEL_EXPORTER_OTLP_LOGS_ENDPOINT or OTEL_ENDPOINT)
     :param Resource resource: Resource attributes describing the service
     :param list[LogRecord] logs: List of log records to send
     :param InstrumentationScope scope: Optional instrumentation scope metadata
@@ -466,8 +520,16 @@ def send_logs(
         send_logs("http://localhost:4318", resource, [error_log])
 
     """
+    # Build the URL - env vars return full URL, explicit endpoint needs path appended
+    if endpoint is None:
+        url = _get_endpoint("logs")
+        if url is None:
+            logging.warning("No endpoint provided and no OTEL env vars set")
+            return False
+    else:
+        url = endpoint.rstrip("/") + "/v1/logs"
+
     # Build the ExportLogsServiceRequest payload
-    # Build scope dict separately for clarity
     scope_log_dict: dict[str, Any] = {"logRecords": [_log_to_dict(log) for log in logs]}
     if scope:
         scope_dict: dict[str, Any] = {"name": scope.name, "version": scope.version}
@@ -483,10 +545,9 @@ def send_logs(
             }
         ]
     }
-
-    # Prepare the HTTP request
-    url = endpoint.rstrip("/") + "/v1/logs"
     headers = {"Content-Type": "application/json"}
+    # Add headers from environment if configured
+    headers.update(_parse_headers())
     data = json.dumps(payload).encode("utf-8")
 
     try:
@@ -506,6 +567,65 @@ def send_logs(
 # -----------------------------------------------------------------------------
 # Internal helpers
 # -----------------------------------------------------------------------------
+
+
+@functools.cache
+def _get_endpoint(signal: str = "traces") -> str | None:
+    """Get the full OTLP endpoint URL from environment variables.
+
+    Per OTEL spec, signal-specific endpoints are used as-is, while the general
+    endpoint has the signal path appended. Returns the full URL ready to use.
+
+    :param signal: The signal type - "traces" or "logs"
+
+    Environment variables checked (in order):
+    - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_LOGS_ENDPOINT (as-is)
+    - OTEL_EXPORTER_OTLP_ENDPOINT (with /v1/{signal} appended)
+    """
+    # Check signal-specific endpoint first - use as-is per OTEL spec
+    if signal == "traces" and (
+        specific := os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+    ):
+        return specific
+    if signal == "logs" and (
+        specific := os.environ.get("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+    ):
+        return specific
+
+    # Fall back to general endpoint - append signal path per OTEL spec
+    if base := os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        return base.rstrip("/") + f"/v1/{signal}"
+    return None
+
+
+@functools.cache
+def _parse_headers() -> dict[str, str]:
+    """Parse OTEL_EXPORTER_OTLP_HEADERS environment variable.
+
+    Format: key1=value1,key2=value2
+    Returns empty dict if not set or invalid.
+    """
+    headers_str = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
+    if not headers_str:
+        return {}
+
+    headers = {}
+    for pair in headers_str.split(","):
+        if "=" in (pair := pair.strip()):
+            key, value = pair.split("=", 1)
+            headers[key.strip()] = value.strip()
+    return headers
+
+
+@functools.cache
+def _get_resource_from_env() -> Resource | None:
+    """Create a Resource from OTEL_SERVICE_NAME environment variable.
+
+    Returns None if not set.
+    """
+    if service_name := os.environ.get("OTEL_SERVICE_NAME"):
+        return Resource({"service.name": service_name})
+    return None
 
 
 def _to_otlp_value(value: Any) -> dict[str, Any]:  # noqa: ANN401, PLR0911
