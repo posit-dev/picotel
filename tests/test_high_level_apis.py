@@ -388,6 +388,25 @@ class TestOTLPHandler:
             finally:
                 logger.removeHandler(handler)
 
+    def test_otlp_handler_exception_writes_to_stderr(self):
+        """Test that exceptions during emit are caught and written to stderr."""
+        import miniotel
+        resource = Resource({"service.name": "test_service"})
+
+        with patch.object(miniotel, "send_logs", side_effect=Exception("Network error")) as mock_send:
+            with patch.object(miniotel.sys, "stderr") as mock_stderr:
+                logger = logging.getLogger("test_exception_stderr")
+                logger.setLevel(logging.INFO)
+                handler = OTLPHandler("http://localhost:4318", resource)
+                logger.addHandler(handler)
+
+                try:
+                    logger.info("This will fail")
+                    assert mock_send.called, "send_logs was not called"
+                    mock_stderr.write.assert_called_with("failed to send log\n")
+                finally:
+                    logger.removeHandler(handler)
+
 
 class TestSpanSendMethod:
     """Tests for Span.send() method."""

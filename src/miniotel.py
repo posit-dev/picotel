@@ -387,7 +387,7 @@ class OTLPHandler(logging.Handler):
                 send_logs(endpoint, resource, [log], self.scope)
         except Exception:
             # Don't let logging errors crash the application
-            sys.stderr.write("miniotel: failed to send log\n")
+            sys.stderr.write("failed to send log\n")
             sys.stderr.flush()
 
 
@@ -692,12 +692,7 @@ def _parse_traceparent() -> tuple[str, str, int] | None:
     ):
         return None
 
-    try:
-        trace_flags = int(trace_flags_str, 16)
-    except ValueError:
-        return None
-
-    return (trace_id, parent_id, trace_flags)
+    return (trace_id, parent_id, int(trace_flags_str, 16))
 
 
 def _to_otlp_value(value: Any) -> dict[str, Any]:  # noqa: ANN401, PLR0911
