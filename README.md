@@ -28,8 +28,6 @@ resource = Resource({"service.name": "my-app", "service.version": "1.0.0"})
 with Span(
     trace_id=new_trace_id(),
     name="process-order",
-    start_time_ns=0,  # 0 means "set automatically"
-    end_time_ns=0,
     endpoint="http://localhost:4318",
     resource=resource,
 ) as span:
@@ -72,8 +70,6 @@ span = Span(
 with Span(
     trace_id=new_trace_id(),
     name="api-call",
-    start_time_ns=0,
-    end_time_ns=0,
     endpoint="http://localhost:4318",
     resource=resource
 ) as span:
@@ -98,8 +94,25 @@ log = LogRecord(
 - `new_trace_id()` - Generate a 32-char hex trace ID
 - `new_span_id()` - Generate a 16-char hex span ID
 - `now_ns()` - Current time in nanoseconds since Unix epoch
-- `send_spans(endpoint, resource, spans)` - Send spans to collector
-- `send_logs(endpoint, resource, logs)` - Send logs to collector
+- `send_spans(endpoint, resource, spans)` - Send spans to collector (raises `PicotelConfigError` if no endpoint configured)
+- `send_logs(endpoint, resource, logs)` - Send logs to collector (raises `PicotelConfigError` if no endpoint configured)
+
+### Exceptions
+
+#### `PicotelConfigError`
+Raised when picotel is missing required configuration:
+
+```python
+from picotel import send_spans, Resource, Span, PicotelConfigError
+
+try:
+    # Without endpoint configured and PICOTEL_SDK_DISABLED not set
+    send_spans(None, resource, [span])
+except PicotelConfigError as e:
+    print(e)  # "No OTLP endpoint configured. Set PICOTEL_EXPORTER_OTLP_ENDPOINT..."
+```
+
+**Note:** The `Span` context manager and `OTLPHandler` do NOT raise this exception - they silently skip sending if no endpoint is configured, to avoid disrupting application flow.
 
 ### Python Logging Integration
 
@@ -137,8 +150,6 @@ endpoint = "http://localhost:4318"
 with Span(
     trace_id=trace_id,
     name="http-request",
-    start_time_ns=0,
-    end_time_ns=0,
     endpoint=endpoint,
     resource=resource
 ) as parent:
@@ -147,8 +158,6 @@ with Span(
         trace_id=trace_id,
         parent_span_id=parent.span_id,
         name="database-query",
-        start_time_ns=0,
-        end_time_ns=0,
         endpoint=endpoint,
         resource=resource
     ) as child:
@@ -173,6 +182,27 @@ export PICOTEL_SERVICE_NAME=my-service  # or OTEL_SERVICE_NAME
 export PICOTEL_EXPORTER_OTLP_HEADERS="api-key=secret,x-custom=value"
 ```
 
+### Disabling picotel
+
+To completely disable picotel telemetry, set the `PICOTEL_SDK_DISABLED` environment variable:
+
+```bash
+export PICOTEL_SDK_DISABLED=true
+```
+
+**When to use:** This is useful when:
+- Embedding picotel in a library where users might want to disable telemetry
+- The main application already uses its own OpenTelemetry SDK and you want to prevent conflicts
+- You need to temporarily disable telemetry for debugging or testing
+
+**What happens:** When disabled:
+- All telemetry operations silently return `False` without sending data
+- No errors or warnings are logged
+- No HTTP requests are made to any collector endpoint
+- This setting takes precedence over all endpoint configurations
+
+**Note:** When `PICOTEL_SDK_DISABLED=true`, you don't need to configure any endpoints - picotel will simply drop all telemetry data silently.
+
 Then use without explicit configuration:
 ```python
 with Span(name="operation") as span:
@@ -195,8 +225,6 @@ resource = Resource({"service.name": "my-app"})
 with Span(
     trace_id=TRACEPARENT,
     name="child-operation",
-    start_time_ns=0,
-    end_time_ns=0,
     endpoint="http://localhost:4318",
     resource=resource
 ) as span:

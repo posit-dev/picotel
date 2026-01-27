@@ -25,20 +25,21 @@ class TestSpanContextManager:
         trace_id = new_trace_id()
         span_id = new_span_id()
 
-        with Span(
-            trace_id=trace_id,
-            span_id=span_id,
-            name="test_span",
-            start_time_ns=0,
-            end_time_ns=0,
-        ) as span:
-            # Start time should be set on enter
-            assert span.start_time_ns > 0
-            start_time = span.start_time_ns
+        # Use a mocked send_spans to avoid actual sending
+        with patch("picotel.send_spans"):
+            with Span(
+                trace_id=trace_id,
+                span_id=span_id,
+                name="test_span",
+                resource=Resource({"service.name": "test"}),
+            ) as span:
+                # Start time should be set on enter
+                assert span.start_time_ns > 0
+                start_time = span.start_time_ns
 
-        # End time should be set on exit
-        assert span.end_time_ns > 0
-        assert span.end_time_ns >= start_time
+            # End time should be set on exit
+            assert span.end_time_ns > 0
+            assert span.end_time_ns >= start_time
 
     def test_span_context_manager_preserves_explicit_times(self):
         """Test that explicit times are not overwritten."""
@@ -47,17 +48,20 @@ class TestSpanContextManager:
         start_time = 1000000000
         end_time = 2000000000
 
-        with Span(
-            trace_id=trace_id,
-            span_id=span_id,
-            name="test_span",
-            start_time_ns=start_time,
-            end_time_ns=end_time,
-        ) as span:
-            # Explicit times should be preserved
-            assert span.start_time_ns == start_time
+        # Use a mocked send_spans to avoid actual sending
+        with patch("picotel.send_spans"):
+            with Span(
+                trace_id=trace_id,
+                span_id=span_id,
+                name="test_span",
+                start_time_ns=start_time,
+                end_time_ns=end_time,
+                resource=Resource({"service.name": "test"}),
+            ) as span:
+                # Explicit times should be preserved
+                assert span.start_time_ns == start_time
 
-        assert span.end_time_ns == end_time
+            assert span.end_time_ns == end_time
 
     def test_span_context_manager_sends_on_exit(self):
         """Test that span is sent when context manager exits."""
@@ -92,22 +96,25 @@ class TestSpanContextManager:
             assert sent_span.attributes["test.key"] == "test_value"
 
     def test_span_context_manager_without_endpoint(self):
-        """Test that span works without endpoint (no sending)."""
+        """Test that span works without endpoint and resource (no sending)."""
+        # Clear caches to avoid getting resources from env
+        picotel._get_resource_from_env.cache_clear()
+        picotel._get_endpoint.cache_clear()
+
         trace_id = new_trace_id()
         span_id = new_span_id()
 
-        with patch("picotel.send_spans") as mock_send:
-            with Span(
-                trace_id=trace_id,
-                span_id=span_id,
-                name="test_span",
-                start_time_ns=0,
-                end_time_ns=0,
-            ) as span:
-                span.attributes["test"] = "value"
+        with patch("picotel._get_resource_from_env", return_value=None):
+            with patch("picotel.send_spans") as mock_send:
+                with Span(
+                    trace_id=trace_id,
+                    span_id=span_id,
+                    name="test_span",
+                ) as span:
+                    span.attributes["test"] = "value"
 
-            # Should not call send_spans without endpoint
-            mock_send.assert_not_called()
+                # Should not call send_spans without resource
+                mock_send.assert_not_called()
 
     def test_span_context_manager_with_scope(self):
         """Test that scope is passed when sending."""
