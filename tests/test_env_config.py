@@ -399,7 +399,7 @@ def test_send_spans_with_headers_from_env(monkeypatch):
 
 
 def test_send_without_endpoint_raises_error():
-    """Test that send functions raise PicotelConfigError when no endpoint is available."""
+    """Test that send functions raise PicotelConfigError when no endpoint."""
     # Clear caches before test
     picotel._get_endpoint.cache_clear()
     picotel._is_disabled.cache_clear()
@@ -529,7 +529,13 @@ def test_explicit_endpoint_still_works(monkeypatch):
 
     import urllib.request  # noqa: PLC0415
 
-    from picotel import LogRecord, Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
+    from picotel import (  # noqa: PLC0415
+        LogRecord,
+        Span,
+        new_span_id,
+        new_trace_id,
+        now_ns,
+    )
 
     captured_requests = []
 

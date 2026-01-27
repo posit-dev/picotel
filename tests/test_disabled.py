@@ -10,12 +10,9 @@ should silently drop all telemetry without errors or warnings.
 import os
 from unittest.mock import patch
 
-import pytest
-
 import picotel
 from picotel import (
     LogRecord,
-    PicotelConfigError,
     Resource,
     Span,
     new_span_id,
@@ -218,7 +215,7 @@ def test_disabled_no_warning_logged(caplog):
 
 
 def test_disabled_returns_false_no_exception():
-    """Test that when PICOTEL_SDK_DISABLED=true, functions return False without exception."""
+    """Test that when disabled, functions return False without exception."""
     picotel._is_disabled.cache_clear()
     picotel._get_endpoint.cache_clear()
 

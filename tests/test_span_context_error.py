@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Test that Span context manager raises error when no endpoint configured."""
 
 import os
@@ -90,7 +89,3 @@ def test_span_context_manager_without_timestamps():
 
         assert span.end_time_ns > 0  # Set automatically
         assert span.end_time_ns >= span.start_time_ns
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
