@@ -381,7 +381,7 @@ def test_send_spans_skips_invalid_trace_id():
 
     assert result is True
     mock_error.assert_called_once()
-    assert "Span validation failed" in mock_error.call_args[0][0]
+    assert "Span invalid" in mock_error.call_args[0][0]
     assert "trace_id is empty" in mock_error.call_args[0][0]
 
     # Verify only valid span was sent

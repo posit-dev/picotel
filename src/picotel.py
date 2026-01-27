@@ -154,7 +154,7 @@ class Span:
     # Required fields (no defaults)
     trace_id: str | object  # Can be TRACEPARENT sentinel
     name: str
-    # Optional fields (with defaults) - start/end times default to 0 for context manager usage
+    # Optional fields (with defaults) - times default to 0 for context manager usage
     start_time_ns: int = 0
     end_time_ns: int = 0
     span_id: str = field(default_factory=new_span_id)
@@ -191,7 +191,7 @@ class Span:
         """Exit the context manager, setting end_time_ns and sending the span."""
         if self.end_time_ns == 0:
             self.end_time_ns = now_ns()
-        # Try to send if we have resource (let send_spans handle endpoint/disabled checks)
+        # Try to send if we have resource (send_spans handles endpoint/disabled)
         endpoint = self.endpoint or None
         resource = self.resource or _get_resource_from_env()
         if resource:
@@ -200,11 +200,11 @@ class Span:
     def _validate(self) -> None:
         """Validate span has required fields set properly."""
         if not self.trace_id:
-            raise PicotelConfigError("Span validation failed: trace_id is empty")
+            raise PicotelConfigError("Span invalid: trace_id is empty")
         if self.start_time_ns <= 0:
-            raise PicotelConfigError("Span validation failed: start_time_ns must be > 0")
+            raise PicotelConfigError("Span invalid: start_time_ns must be > 0")
         if self.end_time_ns <= 0:
-            raise PicotelConfigError("Span validation failed: end_time_ns must be > 0")
+            raise PicotelConfigError("Span invalid: end_time_ns must be > 0")
 
     def send(
         self,
@@ -484,8 +484,8 @@ def send_spans(
         url = _get_endpoint("traces")
         if url is None:
             raise PicotelConfigError(
-                "No OTLP endpoint configured. Set PICOTEL_EXPORTER_OTLP_ENDPOINT or "
-                "OTEL_EXPORTER_OTLP_ENDPOINT, or set PICOTEL_SDK_DISABLED=true to disable telemetry."
+                "No OTLP endpoint configured. Set PICOTEL_EXPORTER_OTLP_ENDPOINT "
+                "or OTEL_EXPORTER_OTLP_ENDPOINT, or set PICOTEL_SDK_DISABLED=true."
             )
     else:
         url = endpoint.rstrip("/") + "/v1/traces"
@@ -497,7 +497,7 @@ def send_spans(
             span._validate()
             valid_spans.append(span)
         except PicotelConfigError as e:
-            _logger.error(str(e))
+            _logger.error(str(e))  # noqa: TRY400
     span_dicts = [_span_to_dict(s) for s in valid_spans]
     scope_span_dict: dict[str, Any] = {"spans": span_dicts}
     if scope:
@@ -591,8 +591,8 @@ def send_logs(
         url = _get_endpoint("logs")
         if url is None:
             raise PicotelConfigError(
-                "No OTLP endpoint configured. Set PICOTEL_EXPORTER_OTLP_ENDPOINT or "
-                "OTEL_EXPORTER_OTLP_ENDPOINT, or set PICOTEL_SDK_DISABLED=true to disable telemetry."
+                "No OTLP endpoint configured. Set PICOTEL_EXPORTER_OTLP_ENDPOINT "
+                "or OTEL_EXPORTER_OTLP_ENDPOINT, or set PICOTEL_SDK_DISABLED=true."
             )
     else:
         url = endpoint.rstrip("/") + "/v1/logs"
