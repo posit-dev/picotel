@@ -381,7 +381,8 @@ def test_send_spans_skips_invalid_trace_id():
 
     assert result is True
     mock_error.assert_called_once()
-    assert "1 span(s) skipped" in mock_error.call_args[0][0]
+    assert "Span validation failed" in mock_error.call_args[0][0]
+    assert "trace_id is empty" in mock_error.call_args[0][0]
 
     # Verify only valid span was sent
     payload = json.loads(MockOTLPHandler.captured_requests[0]["body"])

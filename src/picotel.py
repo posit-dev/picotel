@@ -83,6 +83,10 @@ class InstrumentationScope:
     attributes: dict[str, Any] = field(default_factory=dict)
 
 
+class PicotelConfigError(Exception):
+    """Raised when picotel is misconfigured (e.g., no endpoint and not disabled)."""
+
+
 @dataclass
 class Span:
     """A span represents a single operation within a trace.
@@ -147,10 +151,12 @@ class Span:
         span_id: str
         attributes: dict[str, Any] = field(default_factory=dict)
 
+    # Required fields (no defaults)
     trace_id: str | object  # Can be TRACEPARENT sentinel
     name: str
-    start_time_ns: int
-    end_time_ns: int
+    # Optional fields (with defaults) - start/end times default to 0 for context manager usage
+    start_time_ns: int = 0
+    end_time_ns: int = 0
     span_id: str = field(default_factory=new_span_id)
     parent_span_id: str = ""
     kind: Kind = Kind.INTERNAL
@@ -185,11 +191,20 @@ class Span:
         """Exit the context manager, setting end_time_ns and sending the span."""
         if self.end_time_ns == 0:
             self.end_time_ns = now_ns()
-        # Try to send if we have endpoint (explicit or from env) and resource
-        endpoint = self.endpoint or None  # Let send_spans handle env vars
+        # Try to send if we have resource (let send_spans handle endpoint/disabled checks)
+        endpoint = self.endpoint or None
         resource = self.resource or _get_resource_from_env()
-        if (endpoint or _get_endpoint("traces")) and resource:
+        if resource:
             send_spans(endpoint, resource, [self], self.scope)
+
+    def _validate(self) -> None:
+        """Validate span has required fields set properly."""
+        if not self.trace_id:
+            raise PicotelConfigError("Span validation failed: trace_id is empty")
+        if self.start_time_ns <= 0:
+            raise PicotelConfigError("Span validation failed: start_time_ns must be > 0")
+        if self.end_time_ns <= 0:
+            raise PicotelConfigError("Span validation failed: end_time_ns must be > 0")
 
     def send(
         self,
@@ -381,9 +396,9 @@ class OTLPHandler(logging.Handler):
             )
 
             # Use environment variables if not set in constructor
-            endpoint = self.endpoint or None  # Let send_logs handle env vars
+            endpoint = self.endpoint or None
             resource = self.resource or _get_resource_from_env()
-            if (endpoint or _get_endpoint("logs")) and resource:
+            if resource:
                 send_logs(endpoint, resource, [log], self.scope)
         except Exception:
             # Don't let logging errors crash the application
@@ -460,19 +475,30 @@ def send_spans(
         send_spans("http://localhost:4318", resource, [http_span, db_span])
 
     """
+    # Check if picotel is disabled - return immediately without logging
+    if _is_disabled():
+        return False
+
     # Build the URL - env vars return full URL, explicit endpoint needs path appended
     if endpoint is None:
         url = _get_endpoint("traces")
         if url is None:
-            _logger.warning("endpoint not configured, spans not sent")
-            return False
+            raise PicotelConfigError(
+                "No OTLP endpoint configured. Set PICOTEL_EXPORTER_OTLP_ENDPOINT or "
+                "OTEL_EXPORTER_OTLP_ENDPOINT, or set PICOTEL_SDK_DISABLED=true to disable telemetry."
+            )
     else:
         url = endpoint.rstrip("/") + "/v1/traces"
 
-    # Build the ExportTraceServiceRequest payload (skip spans without trace_id)
-    span_dicts = [_span_to_dict(s) for s in spans if s.trace_id]
-    if (skipped := len(spans) - len(span_dicts)) > 0:
-        _logger.error(f"{skipped} span(s) skipped: missing trace_id")
+    # Validate spans and build the ExportTraceServiceRequest payload
+    valid_spans = []
+    for span in spans:
+        try:
+            span._validate()
+            valid_spans.append(span)
+        except PicotelConfigError as e:
+            _logger.error(str(e))
+    span_dicts = [_span_to_dict(s) for s in valid_spans]
     scope_span_dict: dict[str, Any] = {"spans": span_dicts}
     if scope:
         scope_dict: dict[str, Any] = {"name": scope.name, "version": scope.version}
@@ -556,12 +582,18 @@ def send_logs(
         send_logs("http://localhost:4318", resource, [error_log])
 
     """
+    # Check if picotel is disabled - return immediately without logging
+    if _is_disabled():
+        return False
+
     # Build the URL - env vars return full URL, explicit endpoint needs path appended
     if endpoint is None:
         url = _get_endpoint("logs")
         if url is None:
-            _logger.warning("endpoint not configured, logs not sent")
-            return False
+            raise PicotelConfigError(
+                "No OTLP endpoint configured. Set PICOTEL_EXPORTER_OTLP_ENDPOINT or "
+                "OTEL_EXPORTER_OTLP_ENDPOINT, or set PICOTEL_SDK_DISABLED=true to disable telemetry."
+            )
     else:
         url = endpoint.rstrip("/") + "/v1/logs"
 
@@ -603,6 +635,16 @@ def send_logs(
 # -----------------------------------------------------------------------------
 # Internal helpers
 # -----------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=None)
+def _is_disabled() -> bool:
+    """Check if picotel is disabled via PICOTEL_SDK_DISABLED environment variable.
+
+    When disabled, all send operations return False immediately without logging
+    warnings and without falling back to OTEL_* environment variables.
+    """
+    return os.environ.get("PICOTEL_SDK_DISABLED", "").lower() in ("true", "1")
 
 
 @functools.lru_cache(maxsize=None)

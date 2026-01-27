@@ -5,8 +5,11 @@
 import os
 from unittest.mock import patch
 
+import pytest
+
 import picotel
 from picotel import (
+    PicotelConfigError,
     Resource,
     send_logs,
     send_spans,
@@ -269,6 +272,7 @@ def test_send_spans_with_env_endpoint(monkeypatch):
     # Clear caches before test
     picotel._get_endpoint.cache_clear()
     picotel._get_resource_from_env.cache_clear()
+    picotel._is_disabled.cache_clear()
 
     # Mock urlopen to capture the request
     import urllib.request  # noqa: PLC0415
@@ -313,6 +317,7 @@ def test_send_logs_with_env_endpoint(monkeypatch):
     # Clear caches before test
     picotel._get_endpoint.cache_clear()
     picotel._get_resource_from_env.cache_clear()
+    picotel._is_disabled.cache_clear()
 
     # Mock urlopen to capture the request
     import urllib.request  # noqa: PLC0415
@@ -348,6 +353,7 @@ def test_send_spans_with_headers_from_env(monkeypatch):
     # Clear caches before test
     picotel._get_endpoint.cache_clear()
     picotel._parse_headers.cache_clear()
+    picotel._is_disabled.cache_clear()
 
     import urllib.request  # noqa: PLC0415
 
@@ -392,10 +398,11 @@ def test_send_spans_with_headers_from_env(monkeypatch):
         assert captured_request.headers["Content-type"] == "application/json"
 
 
-def test_send_without_endpoint_returns_false():
-    """Test that send functions return False when no endpoint is available."""
+def test_send_without_endpoint_raises_error():
+    """Test that send functions raise PicotelConfigError when no endpoint is available."""
     # Clear caches before test
     picotel._get_endpoint.cache_clear()
+    picotel._is_disabled.cache_clear()
 
     from picotel import (  # noqa: PLC0415
         LogRecord,
@@ -416,8 +423,17 @@ def test_send_without_endpoint_returns_false():
         )
         log = LogRecord(body="test")
 
-        assert send_spans(None, resource, [span]) is False
-        assert send_logs(None, resource, [log]) is False
+        # Test send_spans raises error
+        with pytest.raises(PicotelConfigError) as exc_info:
+            send_spans(None, resource, [span])
+        assert "No OTLP endpoint configured" in str(exc_info.value)
+        assert "PICOTEL_SDK_DISABLED=true" in str(exc_info.value)
+
+        # Test send_logs raises error
+        with pytest.raises(PicotelConfigError) as exc_info:
+            send_logs(None, resource, [log])
+        assert "No OTLP endpoint configured" in str(exc_info.value)
+        assert "PICOTEL_SDK_DISABLED=true" in str(exc_info.value)
 
 
 def test_span_context_manager_with_env(monkeypatch):
@@ -447,13 +463,11 @@ def test_span_context_manager_with_env(monkeypatch):
             "OTEL_SERVICE_NAME": "env-service",
         },
     ):
-        # Span with no explicit endpoint or resource
+        # Span with no explicit endpoint or resource - timestamps optional
         with Span(
             trace_id=new_trace_id(),
             span_id=new_span_id(),
             name="test-span",
-            start_time_ns=0,  # Will be set by context manager
-            end_time_ns=0,  # Will be set by context manager
         ):
             pass
 
@@ -505,3 +519,41 @@ def test_otlp_handler_with_env(monkeypatch):
         # Should have sent the log
         assert captured_request is not None
         assert captured_request.get_full_url() == "http://logs:4318/v1/logs"
+
+
+
+def test_explicit_endpoint_still_works(monkeypatch):
+    """Test that providing explicit endpoint works even without env vars."""
+    picotel._is_disabled.cache_clear()
+    picotel._get_endpoint.cache_clear()
+
+    import urllib.request  # noqa: PLC0415
+
+    from picotel import LogRecord, Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
+
+    captured_requests = []
+
+    def mock_urlopen(request, timeout=None):  # noqa: ARG001
+        captured_requests.append(request.get_full_url())
+        return MockResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    with patch.dict(os.environ, {}, clear=True):  # No env vars set
+        resource = Resource({"service.name": "test"})
+        span = Span(
+            trace_id=new_trace_id(),
+            span_id=new_span_id(),
+            name="test-span",
+            start_time_ns=now_ns(),
+            end_time_ns=now_ns(),
+        )
+        log = LogRecord(body="test log")
+
+        # Should work with explicit endpoint
+        assert send_spans("http://explicit:4318", resource, [span]) is True
+        assert send_logs("http://explicit:4318", resource, [log]) is True
+
+        # Check URLs were properly constructed
+        assert captured_requests[0] == "http://explicit:4318/v1/traces"
+        assert captured_requests[1] == "http://explicit:4318/v1/logs"
