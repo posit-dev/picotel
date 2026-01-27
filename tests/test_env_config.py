@@ -521,7 +521,6 @@ def test_otlp_handler_with_env(monkeypatch):
         assert captured_request.get_full_url() == "http://logs:4318/v1/logs"
 
 
-
 def test_explicit_endpoint_still_works(monkeypatch):
     """Test that providing explicit endpoint works even without env vars."""
     picotel._is_disabled.cache_clear()
