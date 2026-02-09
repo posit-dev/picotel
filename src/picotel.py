@@ -13,7 +13,7 @@ Requires Python 3.8+ for:
 - dataclasses for clean data structures
 - from __future__ import annotations for type hint syntax
 
-Version: 0.1.0
+Version: 0.2.0
 Author: Alessandro Molina <alessandro.molina@posit.co>
 URL: https://github.com/posit-dev/picotel
 License: MIT
@@ -679,7 +679,9 @@ def _parse_traceparent() -> tuple[str, str, int] | None:
 
     Returns (trace_id, parent_id, trace_flags) or None if not set/invalid.
     """
-    traceparent = os.environ.get("TRACEPARENT", "")
+    traceparent = os.environ.get("PICOTEL_TRACEPARENT", "") or os.environ.get(
+        "TRACEPARENT", ""
+    )
     if not traceparent:
         return None
 

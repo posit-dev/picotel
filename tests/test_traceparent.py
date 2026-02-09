@@ -277,6 +277,39 @@ def test_traceparent_with_uppercase_hex():
         assert trace_flags == 255
 
 
+def test_picotel_traceparent_takes_precedence():
+    """Test that PICOTEL_TRACEPARENT takes precedence over TRACEPARENT."""
+    picotel._parse_traceparent.cache_clear()
+
+    picotel_tp = "00-1111111111111111111111111111111a-2222222222222222-01"
+    standard_tp = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
+    with patch.dict(
+        os.environ,
+        {"PICOTEL_TRACEPARENT": picotel_tp, "TRACEPARENT": standard_tp},
+    ):
+        result = picotel._parse_traceparent()
+        assert result is not None
+        trace_id, parent_id, _ = result
+        assert trace_id == "1111111111111111111111111111111a"
+        assert parent_id == "2222222222222222"
+
+
+def test_picotel_traceparent_falls_back_to_traceparent():
+    """Test that TRACEPARENT is used when PICOTEL_TRACEPARENT is not set."""
+    picotel._parse_traceparent.cache_clear()
+
+    with patch.dict(
+        os.environ,
+        {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
+    ):
+        result = picotel._parse_traceparent()
+        assert result is not None
+        trace_id, parent_id, _ = result
+        assert trace_id == "0af7651916cd43dd8448eb211c80319c"
+        assert parent_id == "b7ad6b7169203331"
+
+
 def test_traceparent_sentinel_identity():
     """Test that TRACEPARENT sentinel can be checked with 'is'."""
     assert TRACEPARENT is picotel.TRACEPARENT
