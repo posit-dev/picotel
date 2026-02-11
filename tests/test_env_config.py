@@ -3,6 +3,7 @@
 """Tests for environment variable configuration."""
 
 import os
+from typing import Dict
 from unittest.mock import patch
 
 import pytest
@@ -39,7 +40,7 @@ def _clear_caches():
     picotel._parse_traceparent.cache_clear()
 
 
-def _prefixed(env: dict[str, str], prefix: str) -> dict[str, str]:
+def _prefixed(env: Dict[str, str], prefix: str) -> Dict[str, str]:
     """Remap standard OTEL_* env var names for the given prefix.
 
     When prefix is empty, returns env unchanged (standard OTEL mode).
@@ -132,7 +133,11 @@ def test_parse_headers(prefix):
     _clear_caches()
 
     env = _prefixed(
-        {"OTEL_EXPORTER_OTLP_HEADERS": "key1=value1,key2=value2,key3=value with spaces"},
+        {
+            "OTEL_EXPORTER_OTLP_HEADERS": (
+                "key1=value1,key2=value2,key3=value with spaces"
+            )
+        },
         prefix,
     )
     with patch.dict(os.environ, env):
@@ -462,7 +467,9 @@ def test_send_spans_with_headers_from_env(prefix, monkeypatch):
     env = _prefixed(
         {
             "OTEL_EXPORTER_OTLP_ENDPOINT": "http://test:4318",
-            "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer token123,X-Custom=value",
+            "OTEL_EXPORTER_OTLP_HEADERS": (
+                "Authorization=Bearer token123,X-Custom=value"
+            ),
         },
         prefix,
     )
@@ -486,7 +493,7 @@ def test_send_spans_with_headers_from_env(prefix, monkeypatch):
 
 
 def test_send_without_endpoint_raises_config_error():
-    """Test that send functions raise PicotelConfigError when no endpoint is available."""
+    """Test that send functions raise PicotelConfigError when no endpoint."""
     _clear_caches()
 
     from picotel import (  # noqa: PLC0415

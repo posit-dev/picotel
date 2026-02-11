@@ -489,8 +489,9 @@ def send_spans(
         url = _get_endpoint("traces")
         if url is None:
             raise PicotelConfigError(
-                f"No OTLP endpoint configured. Set {_env('OTEL_EXPORTER_OTLP_ENDPOINT')}"
-                f" or {_env('OTEL_SDK_DISABLED')}=true to disable telemetry."
+                "No OTLP endpoint configured."
+                f" Set {_env('OTEL_EXPORTER_OTLP_ENDPOINT')}"
+                f" or {_env('OTEL_SDK_DISABLED')}=true."
             )
     else:
         url = endpoint.rstrip("/") + "/v1/traces"
@@ -596,8 +597,9 @@ def send_logs(
         url = _get_endpoint("logs")
         if url is None:
             raise PicotelConfigError(
-                f"No OTLP endpoint configured. Set {_env('OTEL_EXPORTER_OTLP_ENDPOINT')}"
-                f" or {_env('OTEL_SDK_DISABLED')}=true to disable telemetry."
+                "No OTLP endpoint configured."
+                f" Set {_env('OTEL_EXPORTER_OTLP_ENDPOINT')}"
+                f" or {_env('OTEL_SDK_DISABLED')}=true."
             )
     else:
         url = endpoint.rstrip("/") + "/v1/logs"
@@ -656,10 +658,10 @@ def _prefix() -> str:
 def _env(standard_name: str) -> str:
     """Map a standard env-var name to the active namespace.
 
-    With no prefix configured, returns the name unchanged (e.g. "OTEL_SDK_DISABLED").
-    With PICOTEL_PREFIX="PICOTEL", strips the leading "OTEL_" (if present) and
-    prepends the prefix joined by "_" (e.g. "OTEL_SDK_DISABLED" -> "PICOTEL_SDK_DISABLED",
-    "TRACEPARENT" -> "PICOTEL_TRACEPARENT").
+    Without prefix, returns the name unchanged (e.g. ``OTEL_SDK_DISABLED``).
+    With ``PICOTEL_PREFIX="PICOTEL"``, strips the leading ``OTEL_`` and
+    prepends the prefix joined by ``_``
+    (e.g. ``OTEL_SDK_DISABLED`` -> ``PICOTEL_SDK_DISABLED``).
     """
     p = _prefix()
     if not p:
