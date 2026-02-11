@@ -1,8 +1,8 @@
 # Copyright (C) 2026 by Posit Software, PBC.
 
-"""Tests for PICOTEL_SDK_DISABLED functionality.
+"""Tests for SDK_DISABLED functionality.
 
-This module tests the behavior of picotel when the PICOTEL_SDK_DISABLED
+This module tests the behavior of picotel when the OTEL_SDK_DISABLED
 environment variable is set to disable telemetry. When disabled, picotel
 should silently drop all telemetry without errors or warnings.
 """
@@ -36,43 +36,58 @@ class MockResponse:
 
 
 def test_is_disabled_true():
-    """Test _is_disabled returns True when PICOTEL_SDK_DISABLED is set."""
+    """Test _is_disabled returns True when OTEL_SDK_DISABLED is set."""
+    picotel._prefix.cache_clear()
+    picotel._prefix.cache_clear()
+    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
 
-    with patch.dict(os.environ, {"PICOTEL_SDK_DISABLED": "true"}):
+    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}):
         assert picotel._is_disabled() is True
 
+    picotel._prefix.cache_clear()
+    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
 
-    with patch.dict(os.environ, {"PICOTEL_SDK_DISABLED": "TRUE"}):
+    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "TRUE"}):
         assert picotel._is_disabled() is True
 
+    picotel._prefix.cache_clear()
+    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
 
-    with patch.dict(os.environ, {"PICOTEL_SDK_DISABLED": "1"}):
+    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "1"}):
         assert picotel._is_disabled() is True
 
 
 def test_is_disabled_false():
     """Test _is_disabled returns False when not set or set to other values."""
+    picotel._prefix.cache_clear()
+    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
 
     with patch.dict(os.environ, {}, clear=True):
         assert picotel._is_disabled() is False
 
+    picotel._prefix.cache_clear()
+    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
 
-    with patch.dict(os.environ, {"PICOTEL_SDK_DISABLED": "false"}):
+    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "false"}):
         assert picotel._is_disabled() is False
 
+    picotel._prefix.cache_clear()
+    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
 
-    with patch.dict(os.environ, {"PICOTEL_SDK_DISABLED": "0"}):
+    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "0"}):
         assert picotel._is_disabled() is False
 
 
 def test_send_spans_disabled_no_send(monkeypatch):
     """Test send_spans returns False immediately when disabled."""
+    picotel._prefix.cache_clear()
+    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
     picotel._get_endpoint.cache_clear()
 
@@ -90,7 +105,7 @@ def test_send_spans_disabled_no_send(monkeypatch):
     with patch.dict(
         os.environ,
         {
-            "PICOTEL_SDK_DISABLED": "true",
+            "OTEL_SDK_DISABLED": "true",
             "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318",
         },
     ):
@@ -111,6 +126,8 @@ def test_send_spans_disabled_no_send(monkeypatch):
 
 def test_send_logs_disabled_no_send(monkeypatch):
     """Test send_logs returns False immediately when disabled."""
+    picotel._prefix.cache_clear()
+    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
     picotel._get_endpoint.cache_clear()
 
@@ -128,7 +145,7 @@ def test_send_logs_disabled_no_send(monkeypatch):
     with patch.dict(
         os.environ,
         {
-            "PICOTEL_SDK_DISABLED": "true",
+            "OTEL_SDK_DISABLED": "true",
             "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318",
         },
     ):
@@ -144,9 +161,11 @@ def test_send_logs_disabled_no_send(monkeypatch):
 def test_disabled_does_not_use_otel_vars(monkeypatch):
     """Test that when disabled, picotel doesn't use user's OTEL_* variables.
 
-    This is critical: when PICOTEL_SDK_DISABLED=true, picotel must not
-    send telemetry to the user's OTEL endpoint.
+    This is critical: when OTEL_SDK_DISABLED=true, picotel must not
+    send telemetry to any OTEL endpoint.
     """
+    picotel._prefix.cache_clear()
+    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
     picotel._get_endpoint.cache_clear()
 
@@ -165,7 +184,7 @@ def test_disabled_does_not_use_otel_vars(monkeypatch):
     with patch.dict(
         os.environ,
         {
-            "PICOTEL_SDK_DISABLED": "true",
+            "OTEL_SDK_DISABLED": "true",
             "OTEL_EXPORTER_OTLP_ENDPOINT": "http://user-collector:4318",
         },
     ):
@@ -187,6 +206,8 @@ def test_disabled_does_not_use_otel_vars(monkeypatch):
 
 def test_disabled_no_warning_logged(caplog):
     """Test that when disabled, no warning is logged about missing endpoint."""
+    picotel._prefix.cache_clear()
+    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
     picotel._get_endpoint.cache_clear()
 
@@ -196,7 +217,7 @@ def test_disabled_no_warning_logged(caplog):
     caplog.clear()
 
     with caplog.at_level(logging.WARNING, logger="picotel"):
-        with patch.dict(os.environ, {"PICOTEL_SDK_DISABLED": "true"}, clear=True):
+        with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}, clear=True):
             resource = Resource({"service.name": "test"})
             span = Span(
                 trace_id=new_trace_id(),
@@ -216,10 +237,12 @@ def test_disabled_no_warning_logged(caplog):
 
 def test_disabled_returns_false_no_exception():
     """Test that when disabled, functions return False without exception."""
+    picotel._prefix.cache_clear()
+    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
     picotel._get_endpoint.cache_clear()
 
-    with patch.dict(os.environ, {"PICOTEL_SDK_DISABLED": "true"}, clear=True):
+    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}, clear=True):
         resource = Resource({"service.name": "test"})
         span = Span(
             trace_id=new_trace_id(),
