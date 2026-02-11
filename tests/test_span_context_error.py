@@ -12,6 +12,8 @@ from picotel import PicotelConfigError, Resource, Span, new_trace_id
 def test_span_context_manager_raises_without_endpoint():
     """Test that Span context manager raises PicotelConfigError when no endpoint."""
     # Clear caches
+    picotel._prefix.cache_clear()
+    picotel._env.cache_clear()
     picotel._get_endpoint.cache_clear()
     picotel._get_resource_from_env.cache_clear()
     picotel._is_disabled.cache_clear()
@@ -26,12 +28,14 @@ def test_span_context_manager_raises_without_endpoint():
                 pass
 
         assert "No OTLP endpoint configured" in str(exc_info.value)
-        assert "PICOTEL_SDK_DISABLED=true" in str(exc_info.value)
+        assert "OTEL_SDK_DISABLED=true" in str(exc_info.value)
 
 
 def test_span_context_manager_works_with_endpoint():
     """Test that Span context manager works when endpoint is provided."""
     # Clear caches
+    picotel._prefix.cache_clear()
+    picotel._env.cache_clear()
     picotel._get_endpoint.cache_clear()
     picotel._is_disabled.cache_clear()
 
@@ -76,9 +80,11 @@ def test_span_context_manager_works_with_endpoint():
 
 def test_span_context_manager_without_timestamps():
     """Test that timestamps are optional in context manager."""
+    picotel._prefix.cache_clear()
+    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
 
-    with patch.dict(os.environ, {"PICOTEL_SDK_DISABLED": "true"}):
+    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}):
         # Should work without providing timestamps
         with Span(
             trace_id=new_trace_id(),

@@ -232,6 +232,24 @@ with Span(
     pass
 ```
 
+### Namespaced mode with PICOTEL_PREFIX
+
+When you need picotel to use its own env-var namespace (e.g. to avoid
+conflicting with the OpenTelemetry SDK used by user code), set
+`PICOTEL_PREFIX`:
+
+```bash
+export PICOTEL_PREFIX=PICOTEL
+export PICOTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318
+export PICOTEL_SERVICE_NAME=my-service
+export PICOTEL_SDK_DISABLED=true       # instead of OTEL_SDK_DISABLED
+export PICOTEL_TRACEPARENT=00-...      # instead of TRACEPARENT
+```
+
+The prefix replaces the `OTEL_` portion of each standard variable name.
+Non-`OTEL_` names like `TRACEPARENT` get the prefix prepended
+(`PICOTEL_TRACEPARENT`).
+
 ## Limitations / Non-Goals
 
 This library intentionally does **not** support:

@@ -29,6 +29,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -110,9 +111,13 @@ class Span:
             span.attributes["status"] = "success"
         # span is automatically sent on exit
 
-    To continue a trace from TRACEPARENT env var, pass the TRACEPARENT sentinel::
+    To continue a trace from environment, pass the TRACEPARENT sentinel::
 
         span = Span(trace_id=TRACEPARENT, name="child-op", ...)
+
+    When PICOTEL_PREFIX is set (e.g. "PICOTEL"), the prefixed TRACEPARENT
+    variable is read instead of the standard one, avoiding interference
+    with user-configured OTel propagation.
     """
 
     class Kind(IntEnum):
@@ -484,8 +489,8 @@ def send_spans(
         url = _get_endpoint("traces")
         if url is None:
             raise PicotelConfigError(
-                "No OTLP endpoint configured. Set PICOTEL_EXPORTER_OTLP_ENDPOINT "
-                "or OTEL_EXPORTER_OTLP_ENDPOINT, or set PICOTEL_SDK_DISABLED=true."
+                f"No OTLP endpoint configured. Set {_env('OTEL_EXPORTER_OTLP_ENDPOINT')}"
+                f" or {_env('OTEL_SDK_DISABLED')}=true to disable telemetry."
             )
     else:
         url = endpoint.rstrip("/") + "/v1/traces"
@@ -591,8 +596,8 @@ def send_logs(
         url = _get_endpoint("logs")
         if url is None:
             raise PicotelConfigError(
-                "No OTLP endpoint configured. Set PICOTEL_EXPORTER_OTLP_ENDPOINT "
-                "or OTEL_EXPORTER_OTLP_ENDPOINT, or set PICOTEL_SDK_DISABLED=true."
+                f"No OTLP endpoint configured. Set {_env('OTEL_EXPORTER_OTLP_ENDPOINT')}"
+                f" or {_env('OTEL_SDK_DISABLED')}=true to disable telemetry."
             )
     else:
         url = endpoint.rstrip("/") + "/v1/logs"
@@ -638,13 +643,39 @@ def send_logs(
 
 
 @functools.lru_cache(maxsize=None)
-def _is_disabled() -> bool:
-    """Check if picotel is disabled via PICOTEL_SDK_DISABLED environment variable.
+def _prefix() -> str:
+    """Return the env-var namespace prefix configured via PICOTEL_PREFIX.
 
-    When disabled, all send operations return False immediately without logging
-    warnings and without falling back to OTEL_* environment variables.
+    When empty (default), picotel reads standard OTEL_* env vars.
+    When set (e.g. "PICOTEL"), it reads PICOTEL_* vars instead.
     """
-    return os.environ.get("PICOTEL_SDK_DISABLED", "").lower() in ("true", "1")
+    return os.environ.get("PICOTEL_PREFIX", "")
+
+
+@functools.lru_cache(maxsize=None)
+def _env(standard_name: str) -> str:
+    """Map a standard env-var name to the active namespace.
+
+    With no prefix configured, returns the name unchanged (e.g. "OTEL_SDK_DISABLED").
+    With PICOTEL_PREFIX="PICOTEL", strips the leading "OTEL_" (if present) and
+    prepends the prefix joined by "_" (e.g. "OTEL_SDK_DISABLED" -> "PICOTEL_SDK_DISABLED",
+    "TRACEPARENT" -> "PICOTEL_TRACEPARENT").
+    """
+    p = _prefix()
+    if not p:
+        return standard_name
+    if standard_name.startswith("OTEL_"):
+        return p + "_" + standard_name[5:]  # OTEL_X → PICOTEL_X
+    return p + "_" + standard_name  # TRACEPARENT → PICOTEL_TRACEPARENT
+
+
+@functools.lru_cache(maxsize=None)
+def _is_disabled() -> bool:
+    """Check if picotel is disabled via the SDK_DISABLED environment variable.
+
+    When disabled, all send operations return False immediately without logging.
+    """
+    return os.environ.get(_env("OTEL_SDK_DISABLED"), "").lower() in ("true", "1")
 
 
 @functools.lru_cache(maxsize=None)
@@ -655,38 +686,24 @@ def _get_endpoint(signal: str = "traces") -> str | None:
     endpoint has the signal path appended. Returns the full URL ready to use.
 
     :param signal: The signal type - "traces" or "logs"
-
-    Environment variables checked (in order):
-    - PICOTEL_EXPORTER_OTLP_{TRACES,LOGS}_ENDPOINT (as-is)
-    - PICOTEL_EXPORTER_OTLP_ENDPOINT (with /v1/{signal} appended)
-    - OTEL_EXPORTER_OTLP_{TRACES,LOGS}_ENDPOINT (as-is)
-    - OTEL_EXPORTER_OTLP_ENDPOINT (with /v1/{signal} appended)
     """
-
-    def for_prefix(prefix: str) -> str | None:
-        signal_var = f"{prefix}_EXPORTER_OTLP_{signal.upper()}_ENDPOINT"
-        if specific := os.environ.get(signal_var):
-            return specific
-        general_var = f"{prefix}_EXPORTER_OTLP_ENDPOINT"
-        if base := os.environ.get(general_var):
-            return base.rstrip("/") + f"/v1/{signal}"
-        return None
-
-    return for_prefix("PICOTEL") or for_prefix("OTEL")
+    signal_var = _env(f"OTEL_EXPORTER_OTLP_{signal.upper()}_ENDPOINT")
+    if specific := os.environ.get(signal_var):
+        return specific
+    general_var = _env("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if base := os.environ.get(general_var):
+        return base.rstrip("/") + f"/v1/{signal}"
+    return None
 
 
 @functools.lru_cache(maxsize=None)
 def _parse_headers() -> dict[str, str]:
-    """Parse headers from environment variable.
+    """Parse headers from the EXPORTER_OTLP_HEADERS environment variable.
 
-    Checks PICOTEL_EXPORTER_OTLP_HEADERS first, then OTEL_EXPORTER_OTLP_HEADERS.
     Format: key1=value1,key2=value2
     Returns empty dict if not set or invalid.
     """
-    headers_str = os.environ.get(
-        "PICOTEL_EXPORTER_OTLP_HEADERS",
-        os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", ""),
-    )
+    headers_str = os.environ.get(_env("OTEL_EXPORTER_OTLP_HEADERS"), "")
     if not headers_str:
         return {}
 
@@ -700,28 +717,43 @@ def _parse_headers() -> dict[str, str]:
 
 @functools.lru_cache(maxsize=None)
 def _get_resource_from_env() -> Resource | None:
-    """Create a Resource from service name environment variable.
+    """Create a Resource from environment variables.
 
-    Checks PICOTEL_SERVICE_NAME first, falls back to OTEL_SERVICE_NAME.
-    Returns None if not set.
+    Merges attributes from RESOURCE_ATTRIBUTES with the service name from
+    SERVICE_NAME. The RESOURCE_ATTRIBUTES format follows the W3C Baggage spec:
+    ``key1=value1,key2=value2`` with percent-encoding for special characters.
+    All attribute values are strings.
+
+    SERVICE_NAME takes precedence over any service.name in RESOURCE_ATTRIBUTES.
+
+    Returns None if no resource configuration is found.
     """
-    if service_name := os.environ.get(
-        "PICOTEL_SERVICE_NAME", os.environ.get("OTEL_SERVICE_NAME")
-    ):
-        return Resource({"service.name": service_name})
-    return None
+    attrs: dict[str, Any] = {}
+    if res_attrs_str := os.environ.get(_env("OTEL_RESOURCE_ATTRIBUTES")):
+        for pair in res_attrs_str.split(","):
+            if "=" in pair:
+                key, value = pair.split("=", 1)
+                attrs[urllib.parse.unquote(key.strip())] = urllib.parse.unquote(
+                    value.strip()
+                )
+    if service_name := os.environ.get(_env("OTEL_SERVICE_NAME")):
+        attrs["service.name"] = service_name
+    return Resource(attrs) if attrs else None
 
 
 @functools.lru_cache(maxsize=None)
 def _parse_traceparent() -> tuple[str, str, int] | None:
-    """Parse the TRACEPARENT environment variable.
+    """Parse the W3C trace parent from environment.
+
+    Reads the TRACEPARENT variable (or its prefixed variant when PICOTEL_PREFIX
+    is set).
 
     Format: {version}-{trace-id}-{parent-id}-{trace-flags}
     Example: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01
 
     Returns (trace_id, parent_id, trace_flags) or None if not set/invalid.
     """
-    traceparent = os.environ.get("TRACEPARENT", "")
+    traceparent = os.environ.get(_env("TRACEPARENT"), "")
     if not traceparent:
         return None
 
