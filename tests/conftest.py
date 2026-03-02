@@ -6,7 +6,7 @@ import pytest
 # Add src directory to path so tests can import picotel
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-import picotel  # noqa: E402
+import picotel
 
 
 @pytest.fixture(autouse=True)
