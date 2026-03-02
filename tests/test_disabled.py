@@ -219,9 +219,9 @@ def test_disabled_returns_false_no_exception():
 
 def test_disabled_no_traceparent_error():
     """When disabled, TRACEPARENT sentinel must not log errors for missing env var."""
-    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}, clear=True), patch.object(
-        picotel._logger, "error"
-    ) as mock_error:
+    with patch.dict(
+        os.environ, {"OTEL_SDK_DISABLED": "true"}, clear=True
+    ), patch.object(picotel._logger, "error") as mock_error:
         Span(trace_id=TRACEPARENT, name="test", start_time_ns=1000, end_time_ns=2000)
         LogRecord(body="test", trace_id=TRACEPARENT)
 
