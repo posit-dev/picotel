@@ -5,19 +5,11 @@ from unittest.mock import patch
 
 import pytest
 
-import picotel
 from picotel import PicotelConfigError, Resource, Span, new_trace_id
 
 
 def test_span_context_manager_raises_without_endpoint():
     """Test that Span context manager raises PicotelConfigError when no endpoint."""
-    # Clear caches
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
-    picotel._get_endpoint.cache_clear()
-    picotel._get_resource_from_env.cache_clear()
-    picotel._is_disabled.cache_clear()
-
     with patch.dict(os.environ, {}, clear=True):
         with pytest.raises(PicotelConfigError) as exc_info:
             with Span(
@@ -33,12 +25,6 @@ def test_span_context_manager_raises_without_endpoint():
 
 def test_span_context_manager_works_with_endpoint():
     """Test that Span context manager works when endpoint is provided."""
-    # Clear caches
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
-    picotel._get_endpoint.cache_clear()
-    picotel._is_disabled.cache_clear()
-
     # Mock the send to avoid actual network call
     import urllib.request  # noqa: PLC0415
 
@@ -80,10 +66,6 @@ def test_span_context_manager_works_with_endpoint():
 
 def test_span_context_manager_without_timestamps():
     """Test that timestamps are optional in context manager."""
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
-    picotel._is_disabled.cache_clear()
-
     with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}):
         # Should work without providing timestamps
         with Span(

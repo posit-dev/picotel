@@ -29,17 +29,6 @@ class MockResponse:
         pass
 
 
-def _clear_caches():
-    """Clear all picotel LRU caches."""
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
-    picotel._is_disabled.cache_clear()
-    picotel._get_endpoint.cache_clear()
-    picotel._get_resource_from_env.cache_clear()
-    picotel._parse_headers.cache_clear()
-    picotel._parse_traceparent.cache_clear()
-
-
 def _prefixed(env: Dict[str, str], prefix: str) -> Dict[str, str]:
     """Remap standard OTEL_* env var names for the given prefix.
 
@@ -69,8 +58,6 @@ PREFIXES = pytest.mark.parametrize("prefix", ["", "PICOTEL"])
 @PREFIXES
 def test_get_endpoint_traces_specific(prefix):
     """Test that trace-specific endpoint takes precedence."""
-    _clear_caches()
-
     env = _prefixed(
         {
             "OTEL_EXPORTER_OTLP_ENDPOINT": "http://general:4318",
@@ -85,8 +72,6 @@ def test_get_endpoint_traces_specific(prefix):
 @PREFIXES
 def test_get_endpoint_logs_specific(prefix):
     """Test that logs-specific endpoint takes precedence."""
-    _clear_caches()
-
     env = _prefixed(
         {
             "OTEL_EXPORTER_OTLP_ENDPOINT": "http://general:4318",
@@ -104,8 +89,6 @@ def test_get_endpoint_fallback_to_general(prefix):
 
     Per OTEL spec, general endpoint has signal path appended.
     """
-    _clear_caches()
-
     env = _prefixed({"OTEL_EXPORTER_OTLP_ENDPOINT": "http://general:4318"}, prefix)
     with patch.dict(os.environ, env):
         assert picotel._get_endpoint("traces") == "http://general:4318/v1/traces"
@@ -115,8 +98,6 @@ def test_get_endpoint_fallback_to_general(prefix):
 
 def test_get_endpoint_none_when_not_set():
     """Test that get_endpoint returns None when no env vars set."""
-    _clear_caches()
-
     with patch.dict(os.environ, {}, clear=True):
         assert picotel._get_endpoint("traces") is None
         assert picotel._get_endpoint("logs") is None
@@ -130,8 +111,6 @@ def test_get_endpoint_none_when_not_set():
 @PREFIXES
 def test_parse_headers(prefix):
     """Test parsing EXPORTER_OTLP_HEADERS environment variable."""
-    _clear_caches()
-
     env = _prefixed(
         {
             "OTEL_EXPORTER_OTLP_HEADERS": (
@@ -149,20 +128,20 @@ def test_parse_headers(prefix):
         }
 
     # Clear cache between sub-tests
-    _clear_caches()
+    picotel._parse_headers.cache_clear()
 
     # Empty headers
     env = _prefixed({"OTEL_EXPORTER_OTLP_HEADERS": ""}, prefix)
     with patch.dict(os.environ, env):
         assert picotel._parse_headers() == {}
 
-    _clear_caches()
+    picotel._parse_headers.cache_clear()
 
     # Not set
     with patch.dict(os.environ, _prefixed({}, prefix), clear=True):
         assert picotel._parse_headers() == {}
 
-    _clear_caches()
+    picotel._parse_headers.cache_clear()
 
     # Whitespace handling
     env = _prefixed(
@@ -181,8 +160,6 @@ def test_parse_headers(prefix):
 @PREFIXES
 def test_get_resource_from_env(prefix):
     """Test creating Resource from SERVICE_NAME."""
-    _clear_caches()
-
     env = _prefixed({"OTEL_SERVICE_NAME": "my-service"}, prefix)
     with patch.dict(os.environ, env):
         resource = picotel._get_resource_from_env()
@@ -204,7 +181,6 @@ def test_get_resource_from_env(prefix):
 @PREFIXES
 def test_is_disabled(prefix):
     """Test _is_disabled honours the SDK_DISABLED env var."""
-    _clear_caches()
     env = _prefixed({"OTEL_SDK_DISABLED": "true"}, prefix)
     with patch.dict(os.environ, env, clear=True):
         assert picotel._is_disabled() is True
@@ -218,8 +194,6 @@ def test_is_disabled(prefix):
 @PREFIXES
 def test_parse_traceparent(prefix):
     """Test _parse_traceparent reads the (possibly prefixed) TRACEPARENT var."""
-    _clear_caches()
-
     env = _prefixed(
         {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
         prefix,
@@ -240,8 +214,6 @@ def test_parse_traceparent(prefix):
 @PREFIXES
 def test_resource_attributes_basic(prefix):
     """Test RESOURCE_ATTRIBUTES with simple key=value pairs."""
-    _clear_caches()
-
     env = _prefixed(
         {
             "OTEL_SERVICE_NAME": "my-service",
@@ -262,8 +234,6 @@ def test_resource_attributes_basic(prefix):
 @PREFIXES
 def test_resource_attributes_without_service_name(prefix):
     """Test RESOURCE_ATTRIBUTES works without a service name."""
-    _clear_caches()
-
     env = _prefixed({"OTEL_RESOURCE_ATTRIBUTES": "content.guid=abc-123"}, prefix)
     with patch.dict(os.environ, env, clear=True):
         resource = picotel._get_resource_from_env()
@@ -274,8 +244,6 @@ def test_resource_attributes_without_service_name(prefix):
 @PREFIXES
 def test_resource_attributes_service_name_wins_over_attr(prefix):
     """Test SERVICE_NAME overrides service.name in resource attrs."""
-    _clear_caches()
-
     env = _prefixed(
         {
             "OTEL_SERVICE_NAME": "explicit-name",
@@ -292,8 +260,6 @@ def test_resource_attributes_service_name_wins_over_attr(prefix):
 
 def test_resource_attributes_percent_encoded_comma_in_value():
     """Test that percent-encoded comma (%2C) in value is decoded correctly."""
-    _clear_caches()
-
     # value "a,b" is encoded as "a%2Cb"
     with patch.dict(
         os.environ,
@@ -307,8 +273,6 @@ def test_resource_attributes_percent_encoded_comma_in_value():
 
 def test_resource_attributes_percent_encoded_equals_in_value():
     """Test that percent-encoded equals (%3D) in value is decoded correctly."""
-    _clear_caches()
-
     # value "x=1" is encoded as "x%3D1"
     with patch.dict(
         os.environ,
@@ -322,8 +286,6 @@ def test_resource_attributes_percent_encoded_equals_in_value():
 
 def test_resource_attributes_percent_encoded_key():
     """Test that percent-encoded characters in the key are decoded."""
-    _clear_caches()
-
     # key "my,key" is encoded as "my%2Ckey"
     with patch.dict(
         os.environ,
@@ -337,8 +299,6 @@ def test_resource_attributes_percent_encoded_key():
 
 def test_resource_attributes_spaces_and_special_chars():
     """Test percent-encoded spaces and unicode in values."""
-    _clear_caches()
-
     # "hello world" -> "hello%20world", "café" -> "caf%C3%A9"
     with patch.dict(
         os.environ,
@@ -352,8 +312,6 @@ def test_resource_attributes_spaces_and_special_chars():
 
 def test_resource_attributes_all_values_are_strings():
     """Test that all attribute values are strings per the W3C Baggage spec."""
-    _clear_caches()
-
     with patch.dict(
         os.environ,
         {"OTEL_RESOURCE_ATTRIBUTES": "count=42,enabled=true,ratio=3.14"},
@@ -378,8 +336,6 @@ def test_resource_attributes_all_values_are_strings():
 @PREFIXES
 def test_send_spans_with_env_endpoint(prefix, monkeypatch):
     """Test send_spans uses environment variable when endpoint is None."""
-    _clear_caches()
-
     import urllib.request  # noqa: PLC0415
 
     from picotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
@@ -417,8 +373,6 @@ def test_send_logs_with_env_endpoint(prefix, monkeypatch):
 
     Per OTEL spec, signal-specific endpoints are used as-is (include full path).
     """
-    _clear_caches()
-
     import urllib.request  # noqa: PLC0415
 
     from picotel import LogRecord  # noqa: PLC0415
@@ -449,8 +403,6 @@ def test_send_logs_with_env_endpoint(prefix, monkeypatch):
 @PREFIXES
 def test_send_spans_with_headers_from_env(prefix, monkeypatch):
     """Test that headers from environment are included in requests."""
-    _clear_caches()
-
     import urllib.request  # noqa: PLC0415
 
     from picotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
@@ -494,8 +446,6 @@ def test_send_spans_with_headers_from_env(prefix, monkeypatch):
 
 def test_send_without_endpoint_raises_config_error():
     """Test that send functions raise PicotelConfigError when no endpoint."""
-    _clear_caches()
-
     from picotel import (  # noqa: PLC0415
         LogRecord,
         Span,
@@ -524,8 +474,6 @@ def test_send_without_endpoint_raises_config_error():
 @PREFIXES
 def test_send_returns_false_when_disabled(prefix):
     """Test that send functions return False when picotel is disabled."""
-    _clear_caches()
-
     from picotel import (  # noqa: PLC0415
         LogRecord,
         Span,
@@ -553,8 +501,6 @@ def test_send_returns_false_when_disabled(prefix):
 @PREFIXES
 def test_span_context_manager_with_env(prefix, monkeypatch):
     """Test Span context manager uses environment variables."""
-    _clear_caches()
-
     import urllib.request  # noqa: PLC0415
 
     from picotel import Span, new_span_id, new_trace_id  # noqa: PLC0415
@@ -593,8 +539,6 @@ def test_otlp_handler_with_env(prefix, monkeypatch):
 
     Uses general endpoint which gets /v1/logs appended per OTEL spec.
     """
-    _clear_caches()
-
     import logging  # noqa: PLC0415
     import urllib.request  # noqa: PLC0415
 
@@ -630,8 +574,6 @@ def test_otlp_handler_with_env(prefix, monkeypatch):
 
 def test_explicit_endpoint_still_works(monkeypatch):
     """Test that providing explicit endpoint works even without env vars."""
-    _clear_caches()
-
     import urllib.request  # noqa: PLC0415
 
     from picotel import (  # noqa: PLC0415
