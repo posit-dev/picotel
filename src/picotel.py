@@ -176,8 +176,6 @@ class Span:
 
     def __post_init__(self) -> None:
         """Handle TRACEPARENT sentinel for trace_id and parent_span_id."""
-        if _is_disabled():
-            return
         if self.trace_id is TRACEPARENT:
             traceparent = _parse_traceparent()
             if traceparent is None:
@@ -270,8 +268,6 @@ class LogRecord:
 
     def __post_init__(self) -> None:
         """Handle TRACEPARENT sentinel for trace_id and span_id."""
-        if _is_disabled():
-            return
         if self.trace_id is TRACEPARENT:
             traceparent = _parse_traceparent()
             if traceparent is None:

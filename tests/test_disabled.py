@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import picotel
 from picotel import (
+    TRACEPARENT,
     LogRecord,
     Resource,
     Span,
@@ -214,3 +215,14 @@ def test_disabled_returns_false_no_exception():
         # Should return False without raising
         assert send_spans(None, resource, [span]) is False
         assert send_logs(None, resource, [log]) is False
+
+
+def test_disabled_no_traceparent_error():
+    """When disabled, TRACEPARENT sentinel must not log errors for missing env var."""
+    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}, clear=True), patch.object(
+        picotel._logger, "error"
+    ) as mock_error:
+        Span(trace_id=TRACEPARENT, name="test", start_time_ns=1000, end_time_ns=2000)
+        LogRecord(body="test", trace_id=TRACEPARENT)
+
+        mock_error.assert_not_called()
