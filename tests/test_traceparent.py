@@ -11,8 +11,6 @@ from picotel import TRACEPARENT, LogRecord, Span
 
 def test_parse_traceparent_valid():
     """Test parsing valid TRACEPARENT format."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(
         os.environ,
         {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
@@ -27,8 +25,6 @@ def test_parse_traceparent_valid():
 
 def test_parse_traceparent_not_set():
     """Test parsing when TRACEPARENT is not set."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(os.environ, {}, clear=True):
         assert picotel._parse_traceparent() is None
 
@@ -71,8 +67,6 @@ def test_parse_traceparent_invalid_format():
 
 def test_span_with_traceparent_sentinel():
     """Test Span with TRACEPARENT sentinel reads from env."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(
         os.environ,
         {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
@@ -86,8 +80,6 @@ def test_span_with_traceparent_sentinel():
 
 def test_span_with_traceparent_sentinel_no_env():
     """Test Span with TRACEPARENT sentinel and no env var logs error."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(os.environ, {}, clear=True), patch.object(
         picotel._logger, "error"
     ) as mock_error:
@@ -101,8 +93,6 @@ def test_span_with_traceparent_sentinel_no_env():
 
 def test_span_with_explicit_trace_id():
     """Test Span with explicit trace_id does not read from TRACEPARENT."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(
         os.environ,
         {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
@@ -121,8 +111,6 @@ def test_span_with_explicit_trace_id():
 
 def test_span_with_traceparent_and_explicit_parent():
     """Test Span with TRACEPARENT sentinel but explicit parent_span_id."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(
         os.environ,
         {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
@@ -142,8 +130,6 @@ def test_span_with_traceparent_and_explicit_parent():
 
 def test_span_without_traceparent_explicit_trace_required():
     """Test Span without TRACEPARENT sentinel requires explicit trace_id."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(os.environ, {}, clear=True):
         # With explicit trace_id, should work fine
         span = Span(
@@ -157,8 +143,6 @@ def test_span_without_traceparent_explicit_trace_required():
 
 def test_span_span_id_always_generated():
     """Test Span without span_id always generates a new span_id."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(
         os.environ,
         {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
@@ -174,8 +158,6 @@ def test_span_span_id_always_generated():
 
 def test_logrecord_with_traceparent_sentinel():
     """Test LogRecord with TRACEPARENT sentinel populates trace_id and span_id."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(
         os.environ,
         {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
@@ -187,8 +169,6 @@ def test_logrecord_with_traceparent_sentinel():
 
 def test_logrecord_with_traceparent_sentinel_no_env():
     """Test LogRecord with TRACEPARENT sentinel and no env var logs error."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(os.environ, {}, clear=True), patch.object(
         picotel._logger, "error"
     ) as mock_error:
@@ -201,8 +181,6 @@ def test_logrecord_with_traceparent_sentinel_no_env():
 
 def test_logrecord_without_traceparent_sentinel():
     """Test LogRecord without TRACEPARENT sentinel has empty trace_id and span_id."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(
         os.environ,
         {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
@@ -215,8 +193,6 @@ def test_logrecord_without_traceparent_sentinel():
 
 def test_logrecord_with_explicit_trace_id():
     """Test LogRecord with explicit trace_id does not read from TRACEPARENT."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(
         os.environ,
         {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
@@ -231,8 +207,6 @@ def test_logrecord_with_explicit_trace_id():
 
 def test_logrecord_with_traceparent_and_explicit_span_id():
     """Test LogRecord with TRACEPARENT sentinel but explicit span_id."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(
         os.environ,
         {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
@@ -250,8 +224,6 @@ def test_logrecord_with_traceparent_and_explicit_span_id():
 
 def test_traceparent_caching():
     """Test that _parse_traceparent result is cached."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(
         os.environ,
         {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
@@ -263,8 +235,6 @@ def test_traceparent_caching():
 
 def test_traceparent_with_uppercase_hex():
     """Test that TRACEPARENT with uppercase hex is accepted."""
-    picotel._parse_traceparent.cache_clear()
-
     with patch.dict(
         os.environ,
         {"TRACEPARENT": "00-0AF7651916CD43DD8448EB211C80319C-B7AD6B7169203331-FF"},

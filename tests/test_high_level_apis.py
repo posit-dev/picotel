@@ -97,10 +97,6 @@ class TestSpanContextManager:
 
     def test_span_context_manager_without_endpoint(self):
         """Test that span works without endpoint and resource (no sending)."""
-        # Clear caches to avoid getting resources from env
-        picotel._get_resource_from_env.cache_clear()
-        picotel._get_endpoint.cache_clear()
-
         trace_id = new_trace_id()
         span_id = new_span_id()
 
@@ -454,10 +450,6 @@ class TestSpanSendMethod:
 
     def test_span_send_with_env_vars(self):
         """Test Span.send() uses environment variables when parameters are None."""
-        # Clear caches before test
-        picotel._get_endpoint.cache_clear()
-        picotel._get_resource_from_env.cache_clear()
-
         with patch("picotel.send_spans") as mock_send:
             mock_send.return_value = True
 
@@ -485,10 +477,6 @@ class TestSpanSendMethod:
 
     def test_span_send_fails_without_config(self):
         """Test Span.send() returns False when no config is available."""
-        # Clear caches before test
-        picotel._get_endpoint.cache_clear()
-        picotel._get_resource_from_env.cache_clear()
-
         with patch("picotel._get_endpoint") as mock_endpoint:
             mock_endpoint.return_value = None
             with patch("picotel._get_resource_from_env") as mock_resource:
@@ -536,10 +524,6 @@ class TestLogRecordSendMethod:
 
     def test_log_send_with_env_vars(self):
         """Test LogRecord.send() uses environment variables when parameters are None."""
-        # Clear caches before test
-        picotel._get_endpoint.cache_clear()
-        picotel._get_resource_from_env.cache_clear()
-
         with patch("picotel.send_logs") as mock_send:
             mock_send.return_value = True
 
@@ -561,10 +545,6 @@ class TestLogRecordSendMethod:
 
     def test_log_send_fails_without_config(self):
         """Test LogRecord.send() returns False when no config is available."""
-        # Clear caches before test
-        picotel._get_endpoint.cache_clear()
-        picotel._get_resource_from_env.cache_clear()
-
         with patch("picotel._get_endpoint") as mock_endpoint:
             mock_endpoint.return_value = None
             with patch("picotel._get_resource_from_env") as mock_resource:

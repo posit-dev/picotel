@@ -37,23 +37,14 @@ class MockResponse:
 
 def test_is_disabled_true():
     """Test _is_disabled returns True when OTEL_SDK_DISABLED is set."""
-    picotel._prefix.cache_clear()
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
-    picotel._is_disabled.cache_clear()
-
     with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}):
         assert picotel._is_disabled() is True
 
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
 
     with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "TRUE"}):
         assert picotel._is_disabled() is True
 
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
 
     with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "1"}):
@@ -62,22 +53,14 @@ def test_is_disabled_true():
 
 def test_is_disabled_false():
     """Test _is_disabled returns False when not set or set to other values."""
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
-    picotel._is_disabled.cache_clear()
-
     with patch.dict(os.environ, {}, clear=True):
         assert picotel._is_disabled() is False
 
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
 
     with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "false"}):
         assert picotel._is_disabled() is False
 
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
     picotel._is_disabled.cache_clear()
 
     with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "0"}):
@@ -86,11 +69,6 @@ def test_is_disabled_false():
 
 def test_send_spans_disabled_no_send(monkeypatch):
     """Test send_spans returns False immediately when disabled."""
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
-    picotel._is_disabled.cache_clear()
-    picotel._get_endpoint.cache_clear()
-
     import urllib.request  # noqa: PLC0415
 
     request_made = False
@@ -126,11 +104,6 @@ def test_send_spans_disabled_no_send(monkeypatch):
 
 def test_send_logs_disabled_no_send(monkeypatch):
     """Test send_logs returns False immediately when disabled."""
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
-    picotel._is_disabled.cache_clear()
-    picotel._get_endpoint.cache_clear()
-
     import urllib.request  # noqa: PLC0415
 
     request_made = False
@@ -164,11 +137,6 @@ def test_disabled_does_not_use_otel_vars(monkeypatch):
     This is critical: when OTEL_SDK_DISABLED=true, picotel must not
     send telemetry to any OTEL endpoint.
     """
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
-    picotel._is_disabled.cache_clear()
-    picotel._get_endpoint.cache_clear()
-
     import urllib.request  # noqa: PLC0415
 
     captured_url = None
@@ -206,11 +174,6 @@ def test_disabled_does_not_use_otel_vars(monkeypatch):
 
 def test_disabled_no_warning_logged(caplog):
     """Test that when disabled, no warning is logged about missing endpoint."""
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
-    picotel._is_disabled.cache_clear()
-    picotel._get_endpoint.cache_clear()
-
     import logging  # noqa: PLC0415
 
     # Clear any existing log records
@@ -237,11 +200,6 @@ def test_disabled_no_warning_logged(caplog):
 
 def test_disabled_returns_false_no_exception():
     """Test that when disabled, functions return False without exception."""
-    picotel._prefix.cache_clear()
-    picotel._env.cache_clear()
-    picotel._is_disabled.cache_clear()
-    picotel._get_endpoint.cache_clear()
-
     with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}, clear=True):
         resource = Resource({"service.name": "test"})
         span = Span(
