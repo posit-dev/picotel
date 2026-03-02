@@ -9,7 +9,14 @@ permissions:
   contents: write
 
 jobs:
+  lint:
+    uses: ./.github/workflows/ruff.yml
+
+  test:
+    uses: ./.github/workflows/tests.yml
+
   release:
+    needs: [lint, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
