@@ -291,6 +291,195 @@ class TestOTLPHandler:
             finally:
                 logger.removeHandler(handler)
 
+    def test_otlp_handler_extra_defaults(self):
+        """Test that handler.extra provides default trace correlation."""
+        resource = Resource({"service.name": "test_service"})
+        trace_id = new_trace_id()
+        span_id = new_span_id()
+
+        with patch("picotel.send_logs") as mock_send:
+            mock_send.return_value = True
+
+            logger = logging.getLogger("test_extra_defaults")
+            logger.setLevel(logging.INFO)
+            handler = OTLPHandler("http://localhost:4318", resource)
+            handler.extra = {"trace_id": trace_id, "span_id": span_id}
+            logger.addHandler(handler)
+
+            try:
+                # Log without per-record extra — should use handler defaults
+                logger.info("Auto-correlated log")
+
+                mock_send.assert_called_once()
+                log_record = mock_send.call_args[0][2][0]
+                assert log_record.trace_id == trace_id
+                assert log_record.span_id == span_id
+
+            finally:
+                logger.removeHandler(handler)
+
+    def test_otlp_handler_extra_record_overrides_defaults(self):
+        """Test that per-record extra overrides handler.extra defaults."""
+        resource = Resource({"service.name": "test_service"})
+        default_trace_id = new_trace_id()
+        default_span_id = new_span_id()
+        override_span_id = new_span_id()
+
+        with patch("picotel.send_logs") as mock_send:
+            mock_send.return_value = True
+
+            logger = logging.getLogger("test_extra_override")
+            logger.setLevel(logging.INFO)
+            handler = OTLPHandler("http://localhost:4318", resource)
+            handler.extra = {"trace_id": default_trace_id, "span_id": default_span_id}
+            logger.addHandler(handler)
+
+            try:
+                # Log with per-record span_id override
+                logger.info("Override log", extra={"span_id": override_span_id})
+
+                mock_send.assert_called_once()
+                log_record = mock_send.call_args[0][2][0]
+                # trace_id comes from handler default
+                assert log_record.trace_id == default_trace_id
+                # span_id comes from per-record override
+                assert log_record.span_id == override_span_id
+
+            finally:
+                logger.removeHandler(handler)
+
+    def test_otlp_handler_extra_custom_attributes(self):
+        """Test that handler.extra 'attributes' become OTLP log attributes."""
+        resource = Resource({"service.name": "test_service"})
+
+        with patch("picotel.send_logs") as mock_send:
+            mock_send.return_value = True
+
+            logger = logging.getLogger("test_extra_attrs")
+            logger.setLevel(logging.INFO)
+            handler = OTLPHandler("http://localhost:4318", resource)
+            handler.extra = {
+                "attributes": {"worker.id": "w-42", "content.mode": "python-api"},
+            }
+            logger.addHandler(handler)
+
+            try:
+                logger.info("Log with custom attrs")
+
+                mock_send.assert_called_once()
+                log_record = mock_send.call_args[0][2][0]
+                assert log_record.attributes["worker.id"] == "w-42"
+                assert log_record.attributes["content.mode"] == "python-api"
+
+            finally:
+                logger.removeHandler(handler)
+
+    def test_otlp_handler_extra_attributes_merge(self):
+        """Test that record-level attributes merge with handler-level attributes."""
+        resource = Resource({"service.name": "test_service"})
+
+        with patch("picotel.send_logs") as mock_send:
+            mock_send.return_value = True
+
+            logger = logging.getLogger("test_attrs_merge")
+            logger.setLevel(logging.INFO)
+            handler = OTLPHandler("http://localhost:4318", resource)
+            handler.extra = {
+                "attributes": {"worker.id": "w-42", "env": "prod"},
+            }
+            logger.addHandler(handler)
+
+            try:
+                # Record-level attributes override handler "env" but keep "worker.id"
+                logger.info(
+                    "Merged attrs",
+                    extra={"attributes": {"env": "staging", "request.id": "r-1"}},
+                )
+
+                mock_send.assert_called_once()
+                log_record = mock_send.call_args[0][2][0]
+                assert log_record.attributes["worker.id"] == "w-42"
+                assert log_record.attributes["env"] == "staging"
+                assert log_record.attributes["request.id"] == "r-1"
+
+            finally:
+                logger.removeHandler(handler)
+
+    def test_otlp_handler_extra_updated_between_calls(self):
+        """Test that updating handler.extra between calls affects subsequent logs."""
+        resource = Resource({"service.name": "test_service"})
+        trace_1 = new_trace_id()
+        trace_2 = new_trace_id()
+
+        with patch("picotel.send_logs") as mock_send:
+            mock_send.return_value = True
+
+            logger = logging.getLogger("test_extra_update")
+            logger.setLevel(logging.INFO)
+            handler = OTLPHandler("http://localhost:4318", resource)
+            handler.extra = {"trace_id": trace_1}
+            logger.addHandler(handler)
+
+            try:
+                logger.info("first")
+                handler.extra = {"trace_id": trace_2}
+                logger.info("second")
+
+                assert mock_send.call_count == 2
+                assert mock_send.call_args_list[0][0][2][0].trace_id == trace_1
+                assert mock_send.call_args_list[1][0][2][0].trace_id == trace_2
+
+            finally:
+                logger.removeHandler(handler)
+
+    def test_otlp_handler_record_attributes_without_handler_extra(self):
+        """Test record-level attributes work when handler.extra is empty."""
+        resource = Resource({"service.name": "test_service"})
+
+        with patch("picotel.send_logs") as mock_send:
+            mock_send.return_value = True
+
+            logger = logging.getLogger("test_record_attrs_only")
+            logger.setLevel(logging.INFO)
+            handler = OTLPHandler("http://localhost:4318", resource)
+            logger.addHandler(handler)
+
+            try:
+                logger.info("msg", extra={"attributes": {"http.status": 200}})
+
+                mock_send.assert_called_once()
+                log_record = mock_send.call_args[0][2][0]
+                assert log_record.attributes["http.status"] == 200
+                assert "code.filepath" in log_record.attributes
+
+            finally:
+                logger.removeHandler(handler)
+
+    def test_otlp_handler_extra_none_values_ignored(self):
+        """Test that None values in handler.extra are treated as absent."""
+        resource = Resource({"service.name": "test_service"})
+        trace_id = new_trace_id()
+
+        with patch("picotel.send_logs") as mock_send:
+            mock_send.return_value = True
+
+            logger = logging.getLogger("test_none_extra")
+            logger.setLevel(logging.INFO)
+            handler = OTLPHandler("http://localhost:4318", resource)
+            handler.extra = {"trace_id": trace_id, "span_id": None}
+            logger.addHandler(handler)
+
+            try:
+                logger.info("msg")
+
+                mock_send.assert_called_once()
+                log_record = mock_send.call_args[0][2][0]
+                assert log_record.trace_id == trace_id
+                assert log_record.span_id == ""
+
+            finally:
+                logger.removeHandler(handler)
+
     def test_otlp_handler_with_scope(self):
         """Test OTLPHandler with instrumentation scope."""
         resource = Resource({"service.name": "test_service"})

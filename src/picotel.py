@@ -337,7 +337,21 @@ class OTLPHandler(logging.Handler):
             "Database connection failed",
             extra={"trace_id": trace_id, "span_id": span_id},
         )
+
+        # Or set handler-level defaults that apply to every log record.
+        # Per-record extra values override handler defaults for keys in EXTRA_KEYS.
+        handler.extra = {
+            "trace_id": trace_id,
+            "span_id": span_id,
+            "attributes": {"worker.id": "w-42"},
+        }
+        logging.info("This log is automatically correlated with the trace")
+
+        # Per-record attributes merge with handler-level attributes (record wins).
+        logging.info("Request handled", extra={"attributes": {"http.status": 200}})
     """
+
+    EXTRA_KEYS = ("trace_id", "span_id", "attributes")
 
     def __init__(
         self,
@@ -357,6 +371,7 @@ class OTLPHandler(logging.Handler):
         self.endpoint = endpoint
         self.resource = resource
         self.scope = scope
+        self.extra: dict[str, Any] = {}
 
     def emit(self, record: logging.LogRecord) -> None:
         """Export a log record to the OTLP collector.
@@ -382,16 +397,25 @@ class OTLPHandler(logging.Handler):
             else:
                 severity = LogRecord.Severity.FATAL
 
-            # Build attributes with code location
+            record_extra = {
+                key: val
+                for key in self.EXTRA_KEYS
+                if (val := getattr(record, key, None)) is not None
+            }
+            merged = {**self.extra, **record_extra}
+
+            trace_id = merged.get("trace_id") or ""
+            span_id = merged.get("span_id") or ""
+
+            # "attributes" is merged from both levels separately so that
+            # record-level keys extend (not replace) handler-level ones.
             attributes = {
                 "code.filepath": record.pathname,
                 "code.lineno": record.lineno,
                 "code.function": record.funcName,
             }
-
-            # Extract trace correlation from extra dict if present
-            trace_id = getattr(record, "trace_id", "")
-            span_id = getattr(record, "span_id", "")
+            attributes.update(self.extra.get("attributes") or {})
+            attributes.update(record_extra.get("attributes") or {})
 
             # Create and send the log record
             log = LogRecord(
