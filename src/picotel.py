@@ -13,7 +13,7 @@ Requires Python 3.8+ for:
 - dataclasses for clean data structures
 - from __future__ import annotations for type hint syntax
 
-Version: 0.1.1
+Version: 0.1.2
 Author: Alessandro Molina <alessandro.molina@posit.co>
 URL: https://github.com/posit-dev/picotel
 License: MIT
