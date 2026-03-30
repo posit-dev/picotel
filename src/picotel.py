@@ -359,6 +359,7 @@ class OTLPHandler(logging.Handler):
         resource: Resource | None = None,
         scope: InstrumentationScope | None = None,
         level: int = logging.NOTSET,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the OTLP handler.
 
@@ -366,12 +367,13 @@ class OTLPHandler(logging.Handler):
         :param resource: Resource attrs. If None, uses OTEL_SERVICE_NAME
         :param scope: Optional instrumentation scope metadata
         :param level: Minimum log level to export (default: NOTSET exports all)
+        :param extra: Default extra dict merged into every log record
         """
         super().__init__(level)
         self.endpoint = endpoint
         self.resource = resource
         self.scope = scope
-        self.extra: dict[str, Any] = {}
+        self.extra: dict[str, Any] = extra or {}
 
     def emit(self, record: logging.LogRecord) -> None:
         """Export a log record to the OTLP collector.
