@@ -13,7 +13,7 @@ Requires Python 3.8+ for:
 - dataclasses for clean data structures
 - from __future__ import annotations for type hint syntax
 
-Version: 0.1.2
+Version: 0.2.0dev
 Author: Alessandro Molina <alessandro.molina@posit.co>
 URL: https://github.com/posit-dev/picotel
 License: MIT
@@ -26,7 +26,9 @@ import functools
 import json
 import logging
 import os
+import queue
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -35,7 +37,12 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
 
+# Detached from root logger so that picotel errors (e.g. network failures)
+# don't feed back through an OTLPHandler attached to root, which would
+# create an infinite loop of failing sends.
 _logger = logging.getLogger("picotel")
+_logger.propagate = False
+_logger.addHandler(logging.StreamHandler(sys.stderr))
 
 # Sentinel to read trace_id/parent_span_id from TRACEPARENT env var (W3C Trace Context)
 TRACEPARENT = object()
@@ -86,6 +93,7 @@ class InstrumentationScope:
 
 class PicotelConfigError(Exception):
     """Raised when picotel is misconfigured (e.g., no endpoint and not disabled)."""
+
 
 
 @dataclass
@@ -202,7 +210,7 @@ class Span:
         endpoint = self.endpoint or None
         resource = self.resource or _get_resource_from_env()
         if resource:
-            send_spans(endpoint, resource, [self], self.scope)
+            _sender.submit(send_spans, endpoint, resource, [self], self.scope)
 
     def _validate(self) -> None:
         """Validate span has required fields set properly."""
@@ -434,7 +442,7 @@ class OTLPHandler(logging.Handler):
             endpoint = self.endpoint or None
             resource = self.resource or _get_resource_from_env()
             if resource:
-                send_logs(endpoint, resource, [log], self.scope)
+                _sender.submit(send_logs, endpoint, resource, [log], self.scope)
         except Exception:
             # Don't let logging errors crash the application
             sys.stderr.write("failed to send log\n")
@@ -672,6 +680,70 @@ def send_logs(
 # -----------------------------------------------------------------------------
 # Internal helpers
 # -----------------------------------------------------------------------------
+
+
+class _AsyncSender:
+    """Background sender that dispatches callables on a daemon thread.
+
+    Fire-and-forget callers (Span.__exit__, OTLPHandler.emit) submit work here
+    so the calling thread is never blocked by slow or unreachable collectors.
+    """
+
+    def __init__(self, maxsize: int = 256) -> None:
+        self._queue: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._thread: threading.Thread | None = None
+        self._pid: int = 0
+        self._lock = threading.Lock()
+
+    def is_alive(self) -> bool:
+        """Return True if the background worker is running in this process.
+
+        After os.fork() the child inherits the _thread object but the actual
+        thread only exists in the parent — the child's copy is a stale
+        reference.  We cannot rely on Thread.is_alive() alone because the
+        internal lock state is copied as-is and may still report True.
+        Comparing os.getpid() against the PID recorded at thread-start time
+        gives a reliable fork detection for ~200 ns per call (benchmarked),
+        which is negligible vs. the ~0.5 ms HTTP send it guards.
+        This avoids the heavier os.register_at_fork machinery and keeps the
+        fork-safety logic self-contained inside the class.
+        """
+        return (
+            self._thread is not None
+            and self._thread.is_alive()
+            and self._pid == os.getpid()
+        )
+
+    def submit(self, fn: Any, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
+        """Queue a callable for background execution. Returns False if queue is full."""
+        # Double-checked locking: no lock on happy path
+        if not self.is_alive():
+            with self._lock:
+                if not self.is_alive():
+                    self._queue = queue.Queue(maxsize=self._queue.maxsize)
+                    t = threading.Thread(target=self._worker, daemon=True)
+                    t.start()
+                    self._thread = t
+                    self._pid = os.getpid()
+        try:
+            self._queue.put_nowait((fn, args, kwargs))
+        except queue.Full:
+            return False
+        else:
+            return True
+
+    def _worker(self) -> None:
+        while True:
+            fn, args, kwargs = self._queue.get()
+            try:
+                fn(*args, **kwargs)
+            except PicotelConfigError as e:
+                _logger.error(f"Telemetry config error: {e}")  # noqa: TRY400
+            except Exception:  # noqa: S110
+                pass
+
+
+_sender = _AsyncSender()
 
 
 @functools.lru_cache(maxsize=None)

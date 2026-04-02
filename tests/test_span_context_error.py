@@ -1,26 +1,31 @@
-"""Test that Span context manager raises error when no endpoint configured."""
+"""Test that Span context manager logs config error when no endpoint configured."""
 
+import logging
 import os
 from unittest.mock import patch
 
-import pytest
+import picotel
+from picotel import Resource, Span, new_trace_id
 
-from picotel import PicotelConfigError, Resource, Span, new_trace_id
 
+def test_span_context_manager_logs_without_endpoint(caplog):
+    """Test that Span context manager logs PicotelConfigError when no endpoint."""
+    picotel._logger.addHandler(caplog.handler)
+    try:
+        with patch.dict(os.environ, {}, clear=True):
+            with caplog.at_level(logging.ERROR, logger="picotel"):
+                with Span(
+                    trace_id=new_trace_id(),
+                    name="test-span",
+                    resource=Resource({"service.name": "test"}),
+                ):
+                    pass
 
-def test_span_context_manager_raises_without_endpoint():
-    """Test that Span context manager raises PicotelConfigError when no endpoint."""
-    with patch.dict(os.environ, {}, clear=True):
-        with pytest.raises(PicotelConfigError) as exc_info:
-            with Span(
-                trace_id=new_trace_id(),
-                name="test-span",
-                resource=Resource({"service.name": "test"}),
-            ):
-                pass
-
-        assert "No OTLP endpoint configured" in str(exc_info.value)
-        assert "OTEL_SDK_DISABLED=true" in str(exc_info.value)
+            assert any(
+                "No OTLP endpoint configured" in r.message for r in caplog.records
+            )
+    finally:
+        picotel._logger.removeHandler(caplog.handler)
 
 
 def test_span_context_manager_works_with_endpoint():

@@ -582,21 +582,23 @@ class TestOTLPHandler:
                 logger.removeHandler(handler)
 
     def test_otlp_handler_exception_writes_to_stderr(self):
-        """Test that exceptions during emit are caught and written to stderr."""
-        resource = Resource({"service.name": "test_service"})
+        """Test that exceptions during emit are caught and written to stderr.
 
+        Exceptions in send_logs are suppressed by _sender.submit (matching
+        production behavior). This test verifies emit's own error handling
+        by forcing a failure during log record construction, before submit.
+        """
         with patch.object(
-            picotel, "send_logs", side_effect=Exception("Network error")
-        ) as mock_send:
+            picotel, "_get_resource_from_env", side_effect=Exception("Boom")
+        ):
             with patch.object(picotel.sys, "stderr") as mock_stderr:
                 logger = logging.getLogger("test_exception_stderr")
                 logger.setLevel(logging.INFO)
-                handler = OTLPHandler("http://localhost:4318", resource)
+                handler = OTLPHandler("http://localhost:4318", resource=None)
                 logger.addHandler(handler)
 
                 try:
                     logger.info("This will fail")
-                    assert mock_send.called, "send_logs was not called"
                     mock_stderr.write.assert_called_with("failed to send log\n")
                 finally:
                     logger.removeHandler(handler)

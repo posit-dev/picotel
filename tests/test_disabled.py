@@ -177,26 +177,29 @@ def test_disabled_no_warning_logged(caplog):
     """Test that when disabled, no warning is logged about missing endpoint."""
     import logging  # noqa: PLC0415
 
-    # Clear any existing log records
-    caplog.clear()
+    import picotel  # noqa: PLC0415
 
-    with caplog.at_level(logging.WARNING, logger="picotel"):
-        with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}, clear=True):
-            resource = Resource({"service.name": "test"})
-            span = Span(
-                trace_id=new_trace_id(),
-                span_id=new_span_id(),
-                name="test-span",
-                start_time_ns=now_ns(),
-                end_time_ns=now_ns(),
-            )
-            log = LogRecord(body="test log")
+    picotel._logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="picotel"):
+            with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}, clear=True):
+                resource = Resource({"service.name": "test"})
+                span = Span(
+                    trace_id=new_trace_id(),
+                    span_id=new_span_id(),
+                    name="test-span",
+                    start_time_ns=now_ns(),
+                    end_time_ns=now_ns(),
+                )
+                log = LogRecord(body="test log")
 
-            send_spans(None, resource, [span])
-            send_logs(None, resource, [log])
+                send_spans(None, resource, [span])
+                send_logs(None, resource, [log])
 
-            # Should NOT log "endpoint not configured" warnings
-            assert "endpoint not configured" not in caplog.text
+                # Should NOT log "endpoint not configured" warnings
+                assert "endpoint not configured" not in caplog.text
+    finally:
+        picotel._logger.removeHandler(caplog.handler)
 
 
 def test_disabled_returns_false_no_exception():
