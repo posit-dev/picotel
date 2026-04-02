@@ -42,6 +42,7 @@ from typing import Any
 # create an infinite loop of failing sends.
 _logger = logging.getLogger("picotel")
 _logger.propagate = False
+_logger.handlers.clear()
 _logger.addHandler(logging.StreamHandler(sys.stderr))
 
 # Sentinel to read trace_id/parent_span_id from TRACEPARENT env var (W3C Trace Context)
@@ -93,7 +94,6 @@ class InstrumentationScope:
 
 class PicotelConfigError(Exception):
     """Raised when picotel is misconfigured (e.g., no endpoint and not disabled)."""
-
 
 
 @dataclass
@@ -716,6 +716,8 @@ class _AsyncSender:
 
     def submit(self, fn: Any, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
         """Queue a callable for background execution. Returns False if queue is full."""
+        if _is_disabled():
+            return False
         # Double-checked locking: no lock on happy path
         if not self.is_alive():
             with self._lock:

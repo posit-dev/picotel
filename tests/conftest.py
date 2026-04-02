@@ -34,6 +34,14 @@ class _SyncSender:
         return True
 
 
+@pytest.fixture
+def picotel_caplog(caplog):
+    """Attach caplog to the detached picotel._logger for the test duration."""
+    picotel._logger.addHandler(caplog.handler)
+    yield caplog
+    picotel._logger.removeHandler(caplog.handler)
+
+
 @pytest.fixture(autouse=True)
 def _clear_picotel_caches():
     """Clear all picotel LRU caches before every test.

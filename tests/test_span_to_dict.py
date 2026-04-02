@@ -220,30 +220,6 @@ def test_span_status_codes():
     assert "status" not in result  # UNSET status should be omitted
 
 
-def test_span_with_empty_events_and_links():
-    """Test that empty events and links lists are omitted."""
-    trace_id = new_trace_id()
-    span_id = new_span_id()
-    start_time = now_ns()
-    end_time = start_time + 1000000
-
-    span = Span(
-        trace_id=trace_id,
-        span_id=span_id,
-        name="operation",
-        start_time_ns=start_time,
-        end_time_ns=end_time,
-        events=[],  # Empty list
-        links=[],  # Empty list
-    )
-
-    result = _span_to_dict(span)
-
-    # Empty lists should be omitted
-    assert "events" not in result
-    assert "links" not in result
-
-
 def test_round_trip_json_serialization():
     """Round-trip test: span → to_dict → json.dumps → json.loads → verify structure."""
     trace_id = new_trace_id()

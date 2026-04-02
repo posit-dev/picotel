@@ -2,7 +2,6 @@
 
 import logging
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import picotel
@@ -45,17 +44,21 @@ def test_thread_is_daemon():
 
 def test_queue_full_returns_false():
     """submit() returns False when the internal queue is full."""
-    blocker = threading.Event()
+    started = threading.Event()
+    release = threading.Event()
     sender = _AsyncSender(maxsize=1)
-    # First submit blocks the worker so the queue stays occupied
-    sender.submit(blocker.wait)
-    # Give worker time to pick up the first item
-    time.sleep(0.05)
-    # Fill the queue (size=1)
+
+    def blocker():
+        started.set()
+        release.wait()
+
+    sender.submit(blocker)
+    started.wait(timeout=2)
+    # Queue is empty (worker dequeued blocker), fill it
     assert sender.submit(lambda: None) is True
     # Queue is now full
     assert sender.submit(lambda: None) is False
-    blocker.set()
+    release.set()
 
 
 def test_concurrent_submits_create_single_thread():
@@ -69,9 +72,7 @@ def test_concurrent_submits_create_single_thread():
         sender.submit(lambda: None)
         results.append(sender._thread)
 
-    threads = [
-        threading.Thread(target=concurrent_submit) for _ in range(10)
-    ]
+    threads = [threading.Thread(target=concurrent_submit) for _ in range(10)]
     for t in threads:
         t.start()
     for t in threads:
@@ -123,6 +124,21 @@ def test_submit_creates_new_thread_after_pid_change():
     sender.submit(done2.set)
     assert done2.wait(timeout=2), "new thread did not execute callable"
     assert sender._thread is not old_thread, "thread should have been recreated"
+
+
+def test_config_error_in_worker_is_logged(picotel_caplog):
+    """PicotelConfigError raised in a submitted callable is logged by the worker."""
+    done = threading.Event()
+    sender = _AsyncSender()
+
+    def raise_config_error():
+        raise picotel.PicotelConfigError("test config error")
+
+    sender.submit(raise_config_error)
+    sender.submit(done.set)
+    done.wait(timeout=2)
+
+    assert any("test config error" in r.message for r in picotel_caplog.records)
 
 
 def test_error_in_callable_does_not_kill_worker():
@@ -178,9 +194,7 @@ def test_span_exit_delivers_via_async():
     ):
         pass
 
-    assert _CaptureHandler.received.wait(timeout=5), (
-        "span not delivered"
-    )
+    assert _CaptureHandler.received.wait(timeout=5), "span not delivered"
     server_thread.join(timeout=2)
     server.server_close()
 
@@ -205,9 +219,7 @@ def test_otlp_handler_emit_delivers_via_async():
 
     try:
         logger.info("hello from async test")
-        assert _CaptureHandler.received.wait(timeout=5), (
-            "log not delivered"
-        )
+        assert _CaptureHandler.received.wait(timeout=5), "log not delivered"
     finally:
         logger.removeHandler(handler)
         server_thread.join(timeout=2)

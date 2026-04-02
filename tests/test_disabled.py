@@ -36,38 +36,6 @@ class MockResponse:
         pass
 
 
-def test_is_disabled_true():
-    """Test _is_disabled returns True when OTEL_SDK_DISABLED is set."""
-    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}):
-        assert picotel._is_disabled() is True
-
-    picotel._is_disabled.cache_clear()
-
-    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "TRUE"}):
-        assert picotel._is_disabled() is True
-
-    picotel._is_disabled.cache_clear()
-
-    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "1"}):
-        assert picotel._is_disabled() is True
-
-
-def test_is_disabled_false():
-    """Test _is_disabled returns False when not set or set to other values."""
-    with patch.dict(os.environ, {}, clear=True):
-        assert picotel._is_disabled() is False
-
-    picotel._is_disabled.cache_clear()
-
-    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "false"}):
-        assert picotel._is_disabled() is False
-
-    picotel._is_disabled.cache_clear()
-
-    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "0"}):
-        assert picotel._is_disabled() is False
-
-
 def test_send_spans_disabled_no_send(monkeypatch):
     """Test send_spans returns False immediately when disabled."""
     import urllib.request  # noqa: PLC0415
@@ -173,51 +141,27 @@ def test_disabled_does_not_use_otel_vars(monkeypatch):
         assert captured_url is None  # No request made at all
 
 
-def test_disabled_no_warning_logged(caplog):
+def test_disabled_no_warning_logged(picotel_caplog):
     """Test that when disabled, no warning is logged about missing endpoint."""
     import logging  # noqa: PLC0415
 
-    import picotel  # noqa: PLC0415
+    with picotel_caplog.at_level(logging.WARNING, logger="picotel"):
+        with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}, clear=True):
+            resource = Resource({"service.name": "test"})
+            span = Span(
+                trace_id=new_trace_id(),
+                span_id=new_span_id(),
+                name="test-span",
+                start_time_ns=now_ns(),
+                end_time_ns=now_ns(),
+            )
+            log = LogRecord(body="test log")
 
-    picotel._logger.addHandler(caplog.handler)
-    try:
-        with caplog.at_level(logging.WARNING, logger="picotel"):
-            with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}, clear=True):
-                resource = Resource({"service.name": "test"})
-                span = Span(
-                    trace_id=new_trace_id(),
-                    span_id=new_span_id(),
-                    name="test-span",
-                    start_time_ns=now_ns(),
-                    end_time_ns=now_ns(),
-                )
-                log = LogRecord(body="test log")
+            send_spans(None, resource, [span])
+            send_logs(None, resource, [log])
 
-                send_spans(None, resource, [span])
-                send_logs(None, resource, [log])
-
-                # Should NOT log "endpoint not configured" warnings
-                assert "endpoint not configured" not in caplog.text
-    finally:
-        picotel._logger.removeHandler(caplog.handler)
-
-
-def test_disabled_returns_false_no_exception():
-    """Test that when disabled, functions return False without exception."""
-    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}, clear=True):
-        resource = Resource({"service.name": "test"})
-        span = Span(
-            trace_id=new_trace_id(),
-            span_id=new_span_id(),
-            name="test-span",
-            start_time_ns=now_ns(),
-            end_time_ns=now_ns(),
-        )
-        log = LogRecord(body="test log")
-
-        # Should return False without raising
-        assert send_spans(None, resource, [span]) is False
-        assert send_logs(None, resource, [log]) is False
+            # Should NOT log "endpoint not configured" warnings
+            assert "endpoint not configured" not in picotel_caplog.text
 
 
 def test_disabled_no_traceparent_error():

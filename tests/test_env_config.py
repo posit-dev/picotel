@@ -179,11 +179,28 @@ def test_get_resource_from_env(prefix):
 
 
 @PREFIXES
-def test_is_disabled(prefix):
-    """Test _is_disabled honours the SDK_DISABLED env var."""
-    env = _prefixed({"OTEL_SDK_DISABLED": "true"}, prefix)
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("true", True),
+        ("TRUE", True),
+        ("1", True),
+        ("false", False),
+        ("0", False),
+    ],
+)
+def test_is_disabled(prefix, value, expected):
+    """Test _is_disabled honours the SDK_DISABLED env var with various values."""
+    env = _prefixed({"OTEL_SDK_DISABLED": value}, prefix)
     with patch.dict(os.environ, env, clear=True):
-        assert picotel._is_disabled() is True
+        assert picotel._is_disabled() is expected
+
+
+@PREFIXES
+def test_is_disabled_unset(prefix):
+    """Test _is_disabled returns False when SDK_DISABLED is not set."""
+    with patch.dict(os.environ, _prefixed({}, prefix), clear=True):
+        assert picotel._is_disabled() is False
 
 
 # ---------------------------------------------------------------------------

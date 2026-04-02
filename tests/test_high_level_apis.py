@@ -3,6 +3,7 @@
 """Tests for high-level APIs: Span context manager and OTLPHandler."""
 
 import logging
+import os
 from unittest.mock import patch
 
 import picotel
@@ -187,6 +188,22 @@ class TestSpanContextManager:
             assert parent_span.name == "parent_span"
             assert parent_span.trace_id == trace_id
             assert parent_span.parent_span_id == ""  # Default is empty string, not None
+
+    def test_span_context_manager_logs_without_endpoint(self, picotel_caplog):
+        """Span context manager logs config error when no endpoint."""
+        with patch.dict(os.environ, {}, clear=True):
+            with picotel_caplog.at_level(logging.ERROR, logger="picotel"):
+                with Span(
+                    trace_id=new_trace_id(),
+                    name="test-span",
+                    resource=Resource({"service.name": "test"}),
+                ):
+                    pass
+
+            assert any(
+                "No OTLP endpoint configured" in r.message
+                for r in picotel_caplog.records
+            )
 
 
 class TestOTLPHandler:
