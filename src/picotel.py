@@ -694,6 +694,7 @@ class _AsyncSender:
         self._thread: threading.Thread | None = None
         self._pid: int = 0
         self._lock = threading.Lock()
+        self._queue_full_warned = False
 
     def is_alive(self) -> bool:
         """Return True if the background worker is running in this process.
@@ -730,8 +731,12 @@ class _AsyncSender:
         try:
             self._queue.put_nowait((fn, args, kwargs))
         except queue.Full:
+            if not self._queue_full_warned:
+                _logger.error("Telemetry send queue full, signals are being dropped")  # noqa: TRY400
+                self._queue_full_warned = True
             return False
         else:
+            self._queue_full_warned = False
             return True
 
     def _worker(self) -> None:
