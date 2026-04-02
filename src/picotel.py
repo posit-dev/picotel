@@ -218,14 +218,14 @@ class Span:
         endpoint: str | None = None,
         resource: Resource | None = None,
         scope: InstrumentationScope | None = None,
-        timeout: float = 10.0,
+        timeout: float = 2.0,
     ) -> bool:
         """Send this span to an OTLP collector over HTTP.
 
         :param endpoint: OTLP collector URL. If None, uses env vars
         :param resource: Resource attributes. If None, uses env vars
         :param scope: Optional instrumentation scope metadata
-        :param timeout: HTTP request timeout in seconds (default 10.0)
+        :param timeout: HTTP request timeout in seconds (default 2.0)
         """
         # Use environment variables if not provided
         if endpoint is None:
@@ -287,14 +287,14 @@ class LogRecord:
         endpoint: str | None = None,
         resource: Resource | None = None,
         scope: InstrumentationScope | None = None,
-        timeout: float = 10.0,
+        timeout: float = 2.0,
     ) -> bool:
         """Send this log record to an OTLP collector over HTTP.
 
         :param endpoint: OTLP collector URL. If None, uses env vars
         :param resource: Resource attributes. If None, uses env vars
         :param scope: Optional instrumentation scope metadata
-        :param timeout: HTTP request timeout in seconds (default 10.0)
+        :param timeout: HTTP request timeout in seconds (default 2.0)
         """
         # Use environment variables if not provided
         if endpoint is None:
@@ -451,7 +451,7 @@ def send_spans(
     resource: Resource,
     spans: list[Span],
     scope: InstrumentationScope | None = None,
-    timeout: float = 10.0,
+    timeout: float = 2.0,
 ) -> bool:
     """Send a batch of spans to an OTLP collector over HTTP.
 
@@ -464,7 +464,7 @@ def send_spans(
     :param Resource resource: Resource attributes describing the service
     :param list[Span] spans: List of spans to send
     :param InstrumentationScope scope: Optional instrumentation scope metadata
-    :param float timeout: HTTP request timeout in seconds (default 10.0)
+    :param float timeout: HTTP request timeout in seconds (default 2.0)
 
     Example tracing an HTTP request with a database query::
 
@@ -574,7 +574,7 @@ def send_logs(
     resource: Resource,
     logs: list[LogRecord],
     scope: InstrumentationScope | None = None,
-    timeout: float = 10.0,
+    timeout: float = 2.0,
 ) -> bool:
     """Send a batch of logs to an OTLP collector over HTTP.
 
@@ -587,7 +587,7 @@ def send_logs(
     :param Resource resource: Resource attributes describing the service
     :param list[LogRecord] logs: List of log records to send
     :param InstrumentationScope scope: Optional instrumentation scope metadata
-    :param float timeout: HTTP request timeout in seconds (default 10.0)
+    :param float timeout: HTTP request timeout in seconds (default 2.0)
 
     Example logging a payment processing error with trace correlation::
 
