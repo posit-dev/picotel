@@ -8,7 +8,7 @@ should silently drop all telemetry without errors or warnings.
 """
 
 import os
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import picotel
 from picotel import (
@@ -23,30 +23,16 @@ from picotel import (
     send_spans,
 )
 
-
-class MockResponse:
-    """Mock response for urllib.request.urlopen."""
-
-    status = 200
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        pass
+_mock_response = Mock(status=200)
+_mock_response.__enter__ = Mock(return_value=_mock_response)
+_mock_response.__exit__ = Mock(return_value=False)
 
 
 def test_send_spans_disabled_no_send(monkeypatch):
     """Test send_spans returns False immediately when disabled."""
     import urllib.request  # noqa: PLC0415
 
-    request_made = False
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        nonlocal request_made
-        request_made = True
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     with patch.dict(
@@ -68,20 +54,14 @@ def test_send_spans_disabled_no_send(monkeypatch):
         result = send_spans(None, resource, [span])
 
         assert result is False
-        assert request_made is False  # No HTTP request should be made
+        mock_urlopen.assert_not_called()
 
 
 def test_send_logs_disabled_no_send(monkeypatch):
     """Test send_logs returns False immediately when disabled."""
     import urllib.request  # noqa: PLC0415
 
-    request_made = False
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        nonlocal request_made
-        request_made = True
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     with patch.dict(
@@ -97,7 +77,7 @@ def test_send_logs_disabled_no_send(monkeypatch):
         result = send_logs(None, resource, [log])
 
         assert result is False
-        assert request_made is False  # No HTTP request should be made
+        mock_urlopen.assert_not_called()
 
 
 def test_disabled_does_not_use_otel_vars(monkeypatch):
@@ -108,13 +88,7 @@ def test_disabled_does_not_use_otel_vars(monkeypatch):
     """
     import urllib.request  # noqa: PLC0415
 
-    captured_url = None
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        nonlocal captured_url
-        captured_url = request.get_full_url()
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     # Simulate: Connect disabled picotel, but user set their own OTEL endpoint
@@ -138,7 +112,7 @@ def test_disabled_does_not_use_otel_vars(monkeypatch):
 
         # Should NOT send to user's collector
         assert result is False
-        assert captured_url is None  # No request made at all
+        mock_urlopen.assert_not_called()
 
 
 def test_disabled_no_warning_logged(picotel_caplog):

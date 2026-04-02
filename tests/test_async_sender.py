@@ -1,8 +1,9 @@
 """Tests for _AsyncSender background dispatch."""
 
 import logging
+import os
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest.mock import Mock, patch
 
 import picotel
 from picotel import (
@@ -13,6 +14,10 @@ from picotel import (
     new_trace_id,
     now_ns,
 )
+
+_mock_response = Mock(status=200)
+_mock_response.__enter__ = Mock(return_value=_mock_response)
+_mock_response.__exit__ = Mock(return_value=False)
 
 # ---------------------------------------------------------------------------
 # _AsyncSender unit tests
@@ -53,7 +58,7 @@ def test_queue_full_returns_false():
         release.wait()
 
     sender.submit(blocker)
-    started.wait(timeout=2)
+    assert started.wait(timeout=2), "worker did not dequeue the blocker"
     # Queue is empty (worker dequeued blocker), fill it
     assert sender.submit(lambda: None) is True
     # Queue is now full
@@ -152,36 +157,84 @@ def test_error_in_callable_does_not_kill_worker():
     assert done.wait(timeout=2), "worker died after exception"
 
 
+def test_queue_full_warned_logs_once_then_resets(picotel_caplog):
+    """Queue-full error is logged once per episode; resets after success."""
+    started = threading.Event()
+    release = threading.Event()
+    sender = _AsyncSender(maxsize=1)
+
+    def blocker():
+        started.set()
+        release.wait()
+
+    sender.submit(blocker)
+    assert started.wait(timeout=2)
+
+    # Fill the queue, then overflow twice — only one error message expected
+    assert sender.submit(lambda: None) is True  # fills queue
+    assert sender.submit(lambda: None) is False  # first drop
+    assert sender.submit(lambda: None) is False  # second drop (no new log)
+
+    full_messages = [r for r in picotel_caplog.records if "queue full" in r.message]
+    assert len(full_messages) == 1
+
+    # Unblock the worker so the queue drains
+    release.set()
+    done = threading.Event()
+    # Wait until a submit succeeds — that resets the guard
+    assert done.wait(timeout=2) or True  # just a small delay
+    for _ in range(50):
+        if sender.submit(done.set):
+            break
+        threading.Event().wait(0.05)
+    assert done.wait(timeout=2), "worker did not resume"
+
+    # Block and overflow again — should produce a second error message
+    started2 = threading.Event()
+    release2 = threading.Event()
+
+    def blocker2():
+        started2.set()
+        release2.wait()
+
+    sender.submit(blocker2)
+    assert started2.wait(timeout=2)
+    sender.submit(lambda: None)  # fill
+    sender.submit(lambda: None)  # overflow
+
+    full_messages = [r for r in picotel_caplog.records if "queue full" in r.message]
+    assert len(full_messages) == 2
+    release2.set()
+
+
+def test_submit_returns_false_when_disabled():
+    """submit() returns False and never starts a thread when SDK is disabled."""
+    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}):
+        picotel._is_disabled.cache_clear()
+        sender = _AsyncSender()
+        done = threading.Event()
+
+        assert sender.submit(done.set) is False
+        assert sender._thread is None
+        assert not done.is_set(), "callable should not have been executed"
+
+
 # ---------------------------------------------------------------------------
 # Integration: Span.__exit__ and OTLPHandler.emit deliver via async
 # ---------------------------------------------------------------------------
 
 
-class _CaptureHandler(BaseHTTPRequestHandler):
-    """Signals an event on receiving any POST."""
-
-    received = None
-
-    def do_POST(self):
-        _CaptureHandler.received.set()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b"{}")
-
-    def log_message(self, _format, *_args):
-        pass
-
-
-def test_span_exit_delivers_via_async():
+def test_span_exit_delivers_via_async(monkeypatch):
     """Span.__exit__ delivers spans through the background sender."""
-    _CaptureHandler.received = threading.Event()
-    picotel._sender = _AsyncSender()
+    called = threading.Event()
 
-    server = HTTPServer(("127.0.0.1", 0), _CaptureHandler)
-    port = server.server_address[1]
-    server_thread = threading.Thread(target=server.handle_request)
-    server_thread.start()
+    def _urlopen_and_signal(*_args, **_kwargs):
+        called.set()
+        return _mock_response
+
+    mock_urlopen = Mock(side_effect=_urlopen_and_signal)
+    monkeypatch.setattr(picotel.urllib.request, "urlopen", mock_urlopen)
+    picotel._sender = _AsyncSender()
 
     resource = Resource(attributes={"service.name": "test"})
     with Span(
@@ -190,28 +243,30 @@ def test_span_exit_delivers_via_async():
         name="async-test",
         start_time_ns=now_ns(),
         resource=resource,
-        endpoint=f"http://127.0.0.1:{port}",
+        endpoint="http://collector:4318",
     ):
         pass
 
-    assert _CaptureHandler.received.wait(timeout=5), "span not delivered"
-    server_thread.join(timeout=2)
-    server.server_close()
+    assert called.wait(timeout=5), "span not delivered"
+    request = mock_urlopen.call_args[0][0]
+    assert request.get_full_url() == "http://collector:4318/v1/traces"
 
 
-def test_otlp_handler_emit_delivers_via_async():
+def test_otlp_handler_emit_delivers_via_async(monkeypatch):
     """OTLPHandler.emit delivers logs through the background sender."""
-    _CaptureHandler.received = threading.Event()
-    picotel._sender = _AsyncSender()
+    called = threading.Event()
 
-    server = HTTPServer(("127.0.0.1", 0), _CaptureHandler)
-    port = server.server_address[1]
-    server_thread = threading.Thread(target=server.handle_request)
-    server_thread.start()
+    def _urlopen_and_signal(*_args, **_kwargs):
+        called.set()
+        return _mock_response
+
+    mock_urlopen = Mock(side_effect=_urlopen_and_signal)
+    monkeypatch.setattr(picotel.urllib.request, "urlopen", mock_urlopen)
+    picotel._sender = _AsyncSender()
 
     handler = picotel.OTLPHandler(
         resource=Resource(attributes={"service.name": "test"}),
-        endpoint=f"http://127.0.0.1:{port}",
+        endpoint="http://collector:4318",
     )
     logger = logging.getLogger("test_async_handler")
     logger.addHandler(handler)
@@ -219,11 +274,11 @@ def test_otlp_handler_emit_delivers_via_async():
 
     try:
         logger.info("hello from async test")
-        assert _CaptureHandler.received.wait(timeout=5), "log not delivered"
+        assert called.wait(timeout=5), "log not delivered"
+        request = mock_urlopen.call_args[0][0]
+        assert request.get_full_url() == "http://collector:4318/v1/logs"
     finally:
         logger.removeHandler(handler)
-        server_thread.join(timeout=2)
-        server.server_close()
 
 
 def test_span_exit_error_does_not_crash_caller():

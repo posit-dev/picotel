@@ -4,6 +4,8 @@ import json
 import urllib.error
 from unittest.mock import Mock, patch
 
+import pytest
+
 from picotel import (
     InstrumentationScope,
     LogRecord,
@@ -236,30 +238,27 @@ class TestSendLogs:
         assert log_record["spanId"] == "1234567890abcdef"
         assert log_record["flags"] == 1
 
-    def test_send_logs_http_error(self):
-        """Test handling of HTTP errors during log export."""
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            urllib.error.HTTPError(
+                "http://localhost:4318/v1/logs",
+                500,
+                "Internal Server Error",
+                {},
+                None,
+            ),
+            OSError("Connection refused"),
+        ],
+        ids=["http_error", "network_error"],
+    )
+    def test_send_logs_transport_error(self, exc):
+        """Test that HTTP and network errors are logged and return False."""
         resource = Resource({"service.name": "test-service"})
         logs = [LogRecord(body="Test log")]
 
         with patch("picotel.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.side_effect = urllib.error.HTTPError(
-                "http://localhost:4318/v1/logs", 500, "Internal Server Error", {}, None
-            )
-
-            with patch("picotel._logger.error") as mock_error:
-                result = send_logs("http://localhost:4318", resource, logs)
-
-        assert result is False
-        mock_error.assert_called_once()
-        assert "Failed to send logs" in mock_error.call_args[0][0]
-
-    def test_send_logs_network_error(self):
-        """Test handling of network errors during log export."""
-        resource = Resource({"service.name": "test-service"})
-        logs = [LogRecord(body="Test log")]
-
-        with patch("picotel.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.side_effect = OSError("Connection refused")
+            mock_urlopen.side_effect = exc
 
             with patch("picotel._logger.error") as mock_error:
                 result = send_logs("http://localhost:4318", resource, logs)

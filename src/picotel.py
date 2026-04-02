@@ -724,6 +724,7 @@ class _AsyncSender:
             with self._lock:
                 if not self.is_alive():
                     self._queue = queue.Queue(maxsize=self._queue.maxsize)
+                    self._queue_full_warned = False
                     t = threading.Thread(target=self._worker, daemon=True)
                     t.start()
                     self._thread = t

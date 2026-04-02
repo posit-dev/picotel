@@ -4,7 +4,7 @@
 
 import os
 from typing import Dict
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -16,17 +16,9 @@ from picotel import (
     send_spans,
 )
 
-
-class MockResponse:
-    """Mock response for urllib.request.urlopen."""
-
-    status = 200
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        pass
+_mock_response = Mock(status=200)
+_mock_response.__enter__ = Mock(return_value=_mock_response)
+_mock_response.__exit__ = Mock(return_value=False)
 
 
 def _prefixed(env: Dict[str, str], prefix: str) -> Dict[str, str]:
@@ -357,13 +349,7 @@ def test_send_spans_with_env_endpoint(prefix, monkeypatch):
 
     from picotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
 
-    captured_request = None
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        nonlocal captured_request
-        captured_request = request
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     env = _prefixed({"OTEL_EXPORTER_OTLP_ENDPOINT": "http://env-test:4318"}, prefix)
@@ -380,8 +366,8 @@ def test_send_spans_with_env_endpoint(prefix, monkeypatch):
         result = send_spans(None, resource, [span])
 
         assert result is True
-        assert captured_request is not None
-        assert captured_request.get_full_url() == "http://env-test:4318/v1/traces"
+        request = mock_urlopen.call_args[0][0]
+        assert request.get_full_url() == "http://env-test:4318/v1/traces"
 
 
 @PREFIXES
@@ -394,13 +380,7 @@ def test_send_logs_with_env_endpoint(prefix, monkeypatch):
 
     from picotel import LogRecord  # noqa: PLC0415
 
-    captured_request = None
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        nonlocal captured_request
-        captured_request = request
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     env = _prefixed(
@@ -413,8 +393,8 @@ def test_send_logs_with_env_endpoint(prefix, monkeypatch):
         result = send_logs(None, resource, [log])
 
         assert result is True
-        assert captured_request is not None
-        assert captured_request.get_full_url() == "http://logs-env:4318/v1/logs"
+        request = mock_urlopen.call_args[0][0]
+        assert request.get_full_url() == "http://logs-env:4318/v1/logs"
 
 
 @PREFIXES
@@ -424,13 +404,7 @@ def test_send_spans_with_headers_from_env(prefix, monkeypatch):
 
     from picotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
 
-    captured_request = None
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        nonlocal captured_request
-        captured_request = request
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     env = _prefixed(
@@ -455,10 +429,10 @@ def test_send_spans_with_headers_from_env(prefix, monkeypatch):
         result = send_spans(None, resource, [span])
 
         assert result is True
-        assert captured_request is not None
-        assert captured_request.headers["Authorization"] == "Bearer token123"
-        assert captured_request.headers["X-custom"] == "value"
-        assert captured_request.headers["Content-type"] == "application/json"
+        request = mock_urlopen.call_args[0][0]
+        assert request.headers["Authorization"] == "Bearer token123"
+        assert request.headers["X-custom"] == "value"
+        assert request.headers["Content-type"] == "application/json"
 
 
 def test_send_without_endpoint_raises_config_error():
@@ -522,13 +496,7 @@ def test_span_context_manager_with_env(prefix, monkeypatch):
 
     from picotel import Span, new_span_id, new_trace_id  # noqa: PLC0415
 
-    captured_request = None
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        nonlocal captured_request
-        captured_request = request
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     env = _prefixed(
@@ -546,8 +514,8 @@ def test_span_context_manager_with_env(prefix, monkeypatch):
         ):
             pass
 
-        assert captured_request is not None
-        assert captured_request.get_full_url() == "http://env:4318/v1/traces"
+        request = mock_urlopen.call_args[0][0]
+        assert request.get_full_url() == "http://env:4318/v1/traces"
 
 
 @PREFIXES
@@ -561,13 +529,7 @@ def test_otlp_handler_with_env(prefix, monkeypatch):
 
     from picotel import OTLPHandler  # noqa: PLC0415
 
-    captured_request = None
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        nonlocal captured_request
-        captured_request = request
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     env = _prefixed(
@@ -585,8 +547,8 @@ def test_otlp_handler_with_env(prefix, monkeypatch):
 
         logger.info("Test message")
 
-        assert captured_request is not None
-        assert captured_request.get_full_url() == "http://logs:4318/v1/logs"
+        request = mock_urlopen.call_args[0][0]
+        assert request.get_full_url() == "http://logs:4318/v1/logs"
 
 
 def test_explicit_endpoint_still_works(monkeypatch):
@@ -601,12 +563,7 @@ def test_explicit_endpoint_still_works(monkeypatch):
         now_ns,
     )
 
-    captured_requests = []
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        captured_requests.append(request.get_full_url())
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     with patch.dict(os.environ, {}, clear=True):
@@ -623,5 +580,8 @@ def test_explicit_endpoint_still_works(monkeypatch):
         assert send_spans("http://explicit:4318", resource, [span]) is True
         assert send_logs("http://explicit:4318", resource, [log]) is True
 
-        assert captured_requests[0] == "http://explicit:4318/v1/traces"
-        assert captured_requests[1] == "http://explicit:4318/v1/logs"
+        urls = [c[0][0].get_full_url() for c in mock_urlopen.call_args_list]
+        assert urls == [
+            "http://explicit:4318/v1/traces",
+            "http://explicit:4318/v1/logs",
+        ]
