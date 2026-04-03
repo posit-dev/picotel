@@ -682,18 +682,105 @@ def send_logs(
 # -----------------------------------------------------------------------------
 
 
+class _ForkSafeLock:
+    """A lock that recovers from poisoning caused by os.fork().
+
+    When fork() happens while a thread holds a regular ``threading.Lock``,
+    the child process inherits the lock in its acquired state — but the
+    thread that held it does not exist in the child (POSIX guarantees only
+    the calling thread survives fork).  The lock is permanently stuck:
+    any attempt to acquire it deadlocks.
+
+    Internally there are two locks:
+
+    *  A **probe** that serializes fork recovery.  It detects its own
+       poisoning via a timeout and self-heals with CAS replacement +
+       verify-after-acquire, so all competing threads converge on the
+       same replacement rather than each creating a private lock.
+    *  A **real lock** used for actual mutual exclusion.  Replaced under
+       probe protection when poisoned.
+
+    Normal (no-fork) path: one ``os.getpid()`` comparison + one
+    ``lock.acquire()``.
+    Fork-recovery path: probe acquisition (with timeout-based
+    self-healing) → real-lock replacement → ``lock.acquire()``.
+
+    This works regardless of whether fork was invoked from Python
+    (``os.fork()``) or from C code — unlike ``os.register_at_fork``,
+    which only fires for Python-level forks.
+
+    :param float timeout: seconds to wait before declaring the probe
+        poisoned.  Keep this well above the longest legitimate hold time
+        but short enough that a poisoned lock doesn't stall the process
+        for too long.  Default is 5 s, vs. the sub-millisecond actual
+        hold time, so false positives are not a concern.
+    """
+
+    def __init__(self, timeout: float = 5.0) -> None:
+        self._probe = threading.Lock()
+        self._lock = threading.Lock()
+        self._timeout = timeout
+        self._pid = os.getpid()
+
+    def __enter__(self) -> _ForkSafeLock:
+        if self._pid != os.getpid():
+            self._recover()
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *_: Any) -> None:  # noqa: ANN401
+        self._lock.release()
+
+    def _recover(self) -> None:
+        """Ensure ``self._lock`` is healthy after a fork.
+
+        Uses the probe with verify-after-acquire to serialize: after
+        acquiring, confirm that the probe we hold is still the current
+        one.  If someone else replaced it while we waited, release and
+        retry.  This guarantees all threads converge on a single probe
+        instance and therefore serialize through it.
+
+        If the probe itself is poisoned (timeout), CAS-replace it: only
+        overwrite ``self._probe`` if it still points to the lock we
+        timed out on.  Then loop and compete on the (possibly new) probe
+        normally.  Fresh probes are never poisoned, so the loop runs at
+        most twice per thread: once for the timeout, once for the
+        successful acquire.
+        """
+        while True:
+            probe = self._probe
+            if probe.acquire(timeout=self._timeout):
+                if self._probe is probe:
+                    try:
+                        if self._pid != os.getpid():
+                            self._lock = threading.Lock()
+                            self._pid = os.getpid()
+                    finally:
+                        probe.release()
+                    return
+                # Stale — someone replaced the probe while we waited.
+                probe.release()
+                continue
+            # Timed out → probe is poisoned.  CAS-replace and retry.
+            if self._probe is probe:
+                self._probe = threading.Lock()
+
+
 class _AsyncSender:
     """Background sender that dispatches callables on a daemon thread.
 
     Fire-and-forget callers (Span.__exit__, OTLPHandler.emit) submit work here
     so the calling thread is never blocked by slow or unreachable collectors.
+
+    Fork safety is fully encapsulated in ``_ForkSafeLock``: ``submit()``
+    is standard double-checked locking with no fork-specific logic.
     """
 
     def __init__(self, maxsize: int = 256) -> None:
         self._queue: queue.Queue = queue.Queue(maxsize=maxsize)
         self._thread: threading.Thread | None = None
         self._pid: int = 0
-        self._lock = threading.Lock()
+        self._lock = _ForkSafeLock()
         self._queue_full_warned = False
 
     def is_alive(self) -> bool:
@@ -719,7 +806,6 @@ class _AsyncSender:
         """Queue a callable for background execution. Returns False if queue is full."""
         if _is_disabled():
             return False
-        # Double-checked locking: no lock on happy path
         if not self.is_alive():
             with self._lock:
                 if not self.is_alive():
