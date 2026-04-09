@@ -82,6 +82,8 @@ def test_concurrent_submits_create_single_thread():
         t.start()
     for t in threads:
         t.join(timeout=5)
+    for t in threads:
+        assert not t.is_alive(), "concurrent submit thread did not finish"
 
     assert len({id(t) for t in results}) == 1
 
@@ -178,11 +180,10 @@ def test_queue_full_warned_logs_once_then_resets(picotel_caplog):
     full_messages = [r for r in picotel_caplog.records if "queue full" in r.message]
     assert len(full_messages) == 1
 
-    # Unblock the worker so the queue drains
+    # Unblock the worker so the queue drains, then retry until a submit
+    # succeeds (which resets the _queue_full_warned guard).
     release.set()
     done = threading.Event()
-    # Wait until a submit succeeds — that resets the guard
-    assert done.wait(timeout=2) or True  # just a small delay
     for _ in range(50):
         if sender.submit(done.set):
             break
