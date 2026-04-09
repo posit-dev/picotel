@@ -683,31 +683,103 @@ def send_logs(
 
 
 class _ForkSafeLock:
-    """A lock that recovers from poisoning caused by os.fork().
+    """A lock that recovers from poisoning caused by ``os.fork()``.
 
-    When fork() happens while a thread holds a regular ``threading.Lock``,
+    The problem
+    -----------
+    When ``fork()`` happens while a thread holds a ``threading.Lock``,
     the child process inherits the lock in its acquired state — but the
-    thread that held it does not exist in the child (POSIX guarantees only
-    the calling thread survives fork).  The lock is permanently stuck:
-    any attempt to acquire it deadlocks.
+    thread that held it does not exist in the child (POSIX guarantees
+    only the calling thread survives).  The lock is permanently stuck:
+    any attempt to acquire it deadlocks.  This is called a
+    **poisoned lock**.
 
-    Internally there are two locks:
+    ``os.register_at_fork`` does not help because it only fires for
+    Python-level ``os.fork()`` calls.  A C extension that calls
+    ``fork(2)`` directly (native DB drivers, compression libraries,
+    monitoring agents) bypasses the callbacks entirely.  PID comparison
+    is the only universal fork detector.
 
-    *  A **probe** that serializes fork recovery.  It detects its own
-       poisoning via a timeout and self-heals with CAS replacement +
-       verify-after-acquire, so all competing threads converge on the
-       same replacement rather than each creating a private lock.
-    *  A **real lock** used for actual mutual exclusion.  Replaced under
-       probe protection when poisoned.
+    Why a naive fix doesn't work
+    ----------------------------
+    The obvious approach — detect PID mismatch, replace the lock —
+    has a race condition::
+
+        # BROKEN: multiple child threads can each create their own lock
+        if self._pid != os.getpid():
+            self._lock = threading.Lock()   # Thread A: self._lock = L_A
+                                            # Thread B: self._lock = L_B
+        with self._lock:                    # A holds L_A, B holds L_B
+            ...                             # both in critical section!
+
+    The child process might spawn threads before any of them calls this
+    code.  Multiple threads see the PID mismatch simultaneously, each
+    creates a private lock, and mutual exclusion is destroyed.
+
+    The design
+    ----------
+    Internally there are two locks with distinct roles:
+
+    *  **probe** — serializes fork recovery.  It detects its own
+       poisoning via a timeout (the critical section it guards takes
+       microseconds; a 5 s timeout means the holder is a ghost thread).
+       When poisoned, it is CAS-replaced: a fresh lock is written to
+       ``self._probe`` only if no other thread already replaced it.
+       After replacement, all threads retry and converge on the same
+       new probe via **verify-after-acquire** (see below).
+
+    *  **lock** — the actual mutex callers acquire via ``with``.
+       Replaced under probe protection when a fork is detected.
+       Callers never interact with the probe directly.
 
     Normal (no-fork) path: one ``os.getpid()`` comparison + one
-    ``lock.acquire()``.
-    Fork-recovery path: probe acquisition (with timeout-based
-    self-healing) → real-lock replacement → ``lock.acquire()``.
+    ``lock.acquire()``.  No timeout, no overhead.
 
-    This works regardless of whether fork was invoked from Python
-    (``os.fork()``) or from C code — unlike ``os.register_at_fork``,
-    which only fires for Python-level forks.
+    Fork-recovery path: probe acquisition (with timeout-based
+    self-healing) → lock replacement → ``lock.acquire()``.
+
+    Verify-after-acquire: why it's correct
+    ---------------------------------------
+    The CAS on the probe (``if self._probe is probe``) is not atomic —
+    two threads can both check before either writes, so both may
+    replace.  That's fine.  The correctness comes from the step after
+    acquiring::
+
+        probe = self._probe             # snapshot the reference
+        if probe.acquire(timeout=5):    # acquire whatever we read
+            if self._probe is probe:    # ← VERIFY: still current?
+                ...                     # only then enter recovery
+            else:
+                probe.release()         # stale — retry
+                continue
+
+    If thread A acquired a lock that thread B replaced in the meantime,
+    the verify check (``self._probe is probe``) fails.  A releases the
+    stale lock and retries, reading the current ``self._probe``.
+
+    After CAS replacement, ``self._probe`` stabilises (fresh locks are
+    never poisoned, so no further CAS triggers).  All threads converge
+    on the same probe instance and serialize through it.  The first
+    thread in does the recovery; subsequent threads see
+    ``self._pid == os.getpid()`` and skip the replacement.
+
+    Worst-case loop iterations per thread: 2 (one timeout on the
+    poisoned probe, one successful acquire on the fresh replacement).
+    An extra iteration is possible if a thread reads a probe reference
+    between two CAS writes, but this converges immediately.
+
+    Why ``__exit__`` can use ``self._lock.release()`` directly
+    ----------------------------------------------------------
+    Once ``_recover()`` sets ``self._pid = os.getpid()``, no thread
+    will enter ``_recover()`` again (until the next fork).  So between
+    ``__enter__``'s acquire and ``__exit__``'s release, ``self._lock``
+    is stable — nobody is replacing it.
+
+    Write ordering matters: ``_recover()`` writes ``self._lock``
+    **before** ``self._pid``.  Any thread that sees the updated PID
+    (and therefore skips ``_recover()``) is guaranteed to also see the
+    new lock.  This holds under free-threaded Python (no GIL) too,
+    because CPython's per-attribute stores use release semantics.
 
     :param float timeout: seconds to wait before declaring the probe
         poisoned.  Keep this well above the longest legitimate hold time
@@ -732,25 +804,14 @@ class _ForkSafeLock:
         self._lock.release()
 
     def _recover(self) -> None:
-        """Ensure ``self._lock`` is healthy after a fork.
-
-        Uses the probe with verify-after-acquire to serialize: after
-        acquiring, confirm that the probe we hold is still the current
-        one.  If someone else replaced it while we waited, release and
-        retry.  This guarantees all threads converge on a single probe
-        instance and therefore serialize through it.
-
-        If the probe itself is poisoned (timeout), CAS-replace it: only
-        overwrite ``self._probe`` if it still points to the lock we
-        timed out on.  Then loop and compete on the (possibly new) probe
-        normally.  Fresh probes are never poisoned, so the loop runs at
-        most twice per thread: once for the timeout, once for the
-        successful acquire.
-        """
         while True:
             probe = self._probe
             if probe.acquire(timeout=self._timeout):
                 if self._probe is probe:
+                    # We hold the current probe — sole thread in recovery.
+                    # Replace _lock BEFORE updating _pid: any thread that
+                    # later sees the new PID is guaranteed to see the new
+                    # lock (write ordering, see class docstring).
                     try:
                         if self._pid != os.getpid():
                             self._lock = threading.Lock()
@@ -758,10 +819,18 @@ class _ForkSafeLock:
                     finally:
                         probe.release()
                     return
-                # Stale — someone replaced the probe while we waited.
+                # Acquired a probe that another thread already replaced.
+                # The verify-after-acquire check (self._probe is probe)
+                # caught the stale reference.  Release and retry with the
+                # current probe so all threads converge on one instance.
                 probe.release()
                 continue
-            # Timed out → probe is poisoned.  CAS-replace and retry.
+            # Timed out: the probe is poisoned (its holder died in fork).
+            # CAS-replace: only overwrite if nobody else already did.
+            # Non-atomic CAS is fine — if two threads both replace, the
+            # last writer wins and all threads converge on that instance
+            # in the next loop iteration (verify-after-acquire catches
+            # anyone who acquired a now-stale replacement).
             if self._probe is probe:
                 self._probe = threading.Lock()
 
@@ -769,11 +838,32 @@ class _ForkSafeLock:
 class _AsyncSender:
     """Background sender that dispatches callables on a daemon thread.
 
-    Fire-and-forget callers (Span.__exit__, OTLPHandler.emit) submit work here
-    so the calling thread is never blocked by slow or unreachable collectors.
+    Fire-and-forget callers (``Span.__exit__``, ``OTLPHandler.emit``)
+    submit work here so the calling thread is never blocked by slow or
+    unreachable collectors.
 
-    Fork safety is fully encapsulated in ``_ForkSafeLock``: ``submit()``
-    is standard double-checked locking with no fork-specific logic.
+    Fork safety
+    -----------
+    After ``os.fork()``, three things inherited by the child are broken:
+
+    1. **Stale thread** — the ``_thread`` object exists but the OS thread
+       doesn't (POSIX: only the calling thread survives fork).
+       ``is_alive()`` detects this via PID comparison.
+
+    2. **Poisoned lock** — if ``self._lock`` was held at fork time, it's
+       permanently stuck.  ``_ForkSafeLock`` detects this via timeout and
+       replaces the lock transparently.  See its docstring for the full
+       correctness argument.
+
+    3. **Poisoned queue** — ``queue.Queue`` uses internal locks that can
+       also be poisoned.  The queue is replaced inside ``submit()``'s
+       critical section before the new worker reads from it.
+       ``queue.maxsize`` is a plain attribute (not lock-protected), so
+       reading it from a poisoned queue to size the replacement is safe.
+
+    ``submit()`` itself is textbook double-checked locking with no
+    fork-specific logic — all fork recovery is encapsulated in
+    ``_ForkSafeLock``.
     """
 
     def __init__(self, maxsize: int = 256) -> None:
@@ -786,15 +876,13 @@ class _AsyncSender:
     def is_alive(self) -> bool:
         """Return True if the background worker is running in this process.
 
-        After os.fork() the child inherits the _thread object but the actual
-        thread only exists in the parent — the child's copy is a stale
-        reference.  We cannot rely on Thread.is_alive() alone because the
-        internal lock state is copied as-is and may still report True.
-        Comparing os.getpid() against the PID recorded at thread-start time
-        gives a reliable fork detection for ~200 ns per call (benchmarked),
-        which is negligible vs. the ~0.5 ms HTTP send it guards.
-        This avoids the heavier os.register_at_fork machinery and keeps the
-        fork-safety logic self-contained inside the class.
+        The PID check is the primary fork detector: after ``os.fork()``
+        the child inherits ``_thread`` but the actual OS thread only
+        exists in the parent.  ``Thread.is_alive()`` can still report
+        True in the child because its internal lock state is copied
+        as-is during fork, so PID comparison is the reliable signal.
+        ~200 ns per call (vDSO read, not a syscall), negligible vs. the
+        ~0.5 ms HTTP send it guards.
         """
         return (
             self._thread is not None
@@ -809,6 +897,10 @@ class _AsyncSender:
         if not self.is_alive():
             with self._lock:
                 if not self.is_alive():
+                    # Replace the queue: its internal locks may be
+                    # poisoned after fork (same issue as self._lock,
+                    # but handled here rather than in _ForkSafeLock
+                    # because the queue is _AsyncSender's concern).
                     self._queue = queue.Queue(maxsize=self._queue.maxsize)
                     self._queue_full_warned = False
                     t = threading.Thread(target=self._worker, daemon=True)
