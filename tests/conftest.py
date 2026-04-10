@@ -7,31 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import picotel
-from picotel import PicotelConfigError, _logger
-
-
-class _SyncSender:
-    """Synchronous stand-in for _AsyncSender used in most tests.
-
-    Calls the submitted function immediately so tests that mock
-    send_spans/send_logs can assert on the mock without race conditions.
-    Matches production _AsyncSender exception behavior: config errors are
-    logged, all other exceptions are suppressed.
-    """
-
-    _thread = None
-
-    def is_alive(self) -> bool:
-        return True
-
-    def submit(self, fn, *args, **kwargs) -> bool:
-        try:
-            fn(*args, **kwargs)
-        except PicotelConfigError as e:
-            _logger.error(f"Telemetry config error: {e}")
-        except Exception:  # noqa: S110
-            pass
-        return True
+from picotel import _SyncSender
 
 
 @pytest.fixture

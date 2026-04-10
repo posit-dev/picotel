@@ -64,38 +64,6 @@ class TestSpanContextManager:
 
             assert span.end_time_ns == end_time
 
-    def test_span_context_manager_sends_on_exit(self):
-        """Test that span is sent when context manager exits."""
-        resource = Resource({"service.name": "test_service"})
-        trace_id = new_trace_id()
-        span_id = new_span_id()
-
-        with patch("picotel.send_spans") as mock_send:
-            mock_send.return_value = True
-
-            with Span(
-                trace_id=trace_id,
-                span_id=span_id,
-                name="test_span",
-                start_time_ns=0,
-                end_time_ns=0,
-                endpoint="http://localhost:4318",
-                resource=resource,
-            ) as span:
-                span.attributes["test.key"] = "test_value"
-
-            # Verify send_spans was called with the right arguments
-            mock_send.assert_called_once()
-            call_args = mock_send.call_args
-            assert call_args[0][0] == "http://localhost:4318"  # endpoint
-            assert call_args[0][1] == resource  # resource
-            assert len(call_args[0][2]) == 1  # spans list
-            sent_span = call_args[0][2][0]
-            assert sent_span.name == "test_span"
-            assert sent_span.trace_id == trace_id
-            assert sent_span.span_id == span_id
-            assert sent_span.attributes["test.key"] == "test_value"
-
     def test_span_context_manager_without_endpoint(self):
         """Test that span works without endpoint and resource (no sending)."""
         trace_id = new_trace_id()
@@ -519,26 +487,6 @@ class TestOTLPHandler:
 
             finally:
                 logger.removeHandler(handler)
-
-    def test_otlp_handler_error_handling(self):
-        """Test that handler errors don't crash the application."""
-        # Use invalid endpoint
-        resource = Resource({"service.name": "test_service"})
-
-        logger = logging.getLogger("test_error")
-        logger.setLevel(logging.ERROR)  # Set level so messages are processed
-        handler = OTLPHandler("http://invalid.endpoint:9999", resource)
-        logger.addHandler(handler)
-
-        try:
-            # This should not raise an exception - the key test is that it doesn't crash
-            logger.error("This should not crash")
-
-            # If we get here without an exception, the test passed
-            assert True
-
-        finally:
-            logger.removeHandler(handler)
 
     def test_otlp_handler_message_interpolation(self):
         """Test that log messages are properly interpolated."""

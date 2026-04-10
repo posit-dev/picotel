@@ -463,8 +463,10 @@ def test_send_without_endpoint_raises_config_error():
 
 
 @PREFIXES
-def test_send_returns_false_when_disabled(prefix):
-    """Test that send functions return False when picotel is disabled."""
+def test_send_returns_false_when_disabled(prefix, monkeypatch):
+    """Test that send functions return False and make no HTTP request when disabled."""
+    import urllib.request  # noqa: PLC0415
+
     from picotel import (  # noqa: PLC0415
         LogRecord,
         Span,
@@ -472,6 +474,9 @@ def test_send_returns_false_when_disabled(prefix):
         new_trace_id,
         now_ns,
     )
+
+    mock_urlopen = Mock(return_value=_mock_response)
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     env = _prefixed({"OTEL_SDK_DISABLED": "true"}, prefix)
     with patch.dict(os.environ, env, clear=True):
@@ -487,6 +492,24 @@ def test_send_returns_false_when_disabled(prefix):
 
         assert send_spans(None, resource, [span]) is False
         assert send_logs(None, resource, [log]) is False
+        mock_urlopen.assert_not_called()
+
+
+def test_disabled_no_traceparent_error():
+    """When disabled, TRACEPARENT sentinel must not log errors for missing env var."""
+    from picotel import (  # noqa: PLC0415
+        TRACEPARENT,
+        LogRecord,
+        Span,
+    )
+
+    with patch.dict(
+        os.environ, {"OTEL_SDK_DISABLED": "true"}, clear=True
+    ), patch.object(picotel._logger, "error") as mock_error:
+        Span(trace_id=TRACEPARENT, name="test", start_time_ns=1000, end_time_ns=2000)
+        LogRecord(body="test", trace_id=TRACEPARENT)
+
+        mock_error.assert_not_called()
 
 
 @PREFIXES
@@ -585,3 +608,39 @@ def test_explicit_endpoint_still_works(monkeypatch):
             "http://explicit:4318/v1/traces",
             "http://explicit:4318/v1/logs",
         ]
+
+
+# ---------------------------------------------------------------------------
+# _get_sender() factory
+# ---------------------------------------------------------------------------
+
+
+def test_get_sender_default_is_sync():
+    """_get_sender() returns _SyncSender when PICOTEL_ASYNC is not set."""
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("PICOTEL_ASYNC", None)
+        assert isinstance(picotel._get_sender(), picotel._SyncSender)
+
+
+def test_get_sender_async_true():
+    """_get_sender() returns _AsyncSender when PICOTEL_ASYNC=true."""
+    with patch.dict(os.environ, {"PICOTEL_ASYNC": "true"}):
+        assert isinstance(picotel._get_sender(), picotel._AsyncSender)
+
+
+def test_get_sender_async_one():
+    """_get_sender() returns _AsyncSender when PICOTEL_ASYNC=1."""
+    with patch.dict(os.environ, {"PICOTEL_ASYNC": "1"}):
+        assert isinstance(picotel._get_sender(), picotel._AsyncSender)
+
+
+def test_get_sender_false_is_sync():
+    """_get_sender() returns _SyncSender when PICOTEL_ASYNC=false."""
+    with patch.dict(os.environ, {"PICOTEL_ASYNC": "false"}):
+        assert isinstance(picotel._get_sender(), picotel._SyncSender)
+
+
+def test_get_sender_case_insensitive():
+    """_get_sender() handles case-insensitive PICOTEL_ASYNC values."""
+    with patch.dict(os.environ, {"PICOTEL_ASYNC": "TRUE"}):
+        assert isinstance(picotel._get_sender(), picotel._AsyncSender)

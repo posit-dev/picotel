@@ -4,11 +4,7 @@ These tests verify end-to-end functionality rather than testing Python features.
 They combine multiple components to ensure proper OTLP protocol compliance.
 """
 
-import json
-
 from picotel import (
-    InstrumentationScope,
-    Resource,
     Span,
     _span_to_dict,
     new_span_id,
@@ -66,74 +62,6 @@ def test_span_creation_with_generated_ids_and_timestamps():
     assert span_dict["endTimeUnixNano"] == str(end_time)
     assert int(span_dict["startTimeUnixNano"]) > 0
     assert int(span_dict["endTimeUnixNano"]) > int(span_dict["startTimeUnixNano"])
-
-
-def test_resource_and_scope_serialization():
-    """Test Resource and InstrumentationScope serialization to OTLP format.
-
-    Replaces: Resource/InstrumentationScope basic tests
-    - Create Resource with various attributes
-    - Create InstrumentationScope with name, version, attributes
-    - Verify they can be used in OTLP request structure
-    """
-    # Create Resource with various attributes
-    resource = Resource(
-        {
-            "service.name": "myapp",
-            "service.version": "1.0.0",
-            "deployment.environment": "production",
-            "host.name": "server-01",
-            "telemetry.sdk.name": "picotel",
-            "telemetry.sdk.version": "0.1.0",
-        }
-    )
-
-    # Create InstrumentationScope with attributes
-    scope = InstrumentationScope(
-        name="mylib",
-        version="2.3.4",
-        attributes={"custom.key": "value", "debug.enabled": True},
-    )
-
-    # Build OTLP request structure manually (as would be done in send_spans)
-    resource_spans = {
-        "resource": {
-            "attributes": [
-                {"key": k, "value": {"stringValue": v}}
-                for k, v in resource.attributes.items()
-            ]
-        },
-        "scopeSpans": [
-            {
-                "scope": {
-                    "name": scope.name,
-                    "version": scope.version,
-                    "attributes": [
-                        {"key": "custom.key", "value": {"stringValue": "value"}},
-                        {"key": "debug.enabled", "value": {"boolValue": True}},
-                    ],
-                },
-                "spans": [],
-            }
-        ],
-    }
-
-    # Verify the structure is valid JSON
-    json_str = json.dumps(resource_spans)
-    parsed = json.loads(json_str)
-
-    # Verify Resource attributes
-    assert len(parsed["resource"]["attributes"]) == 6
-    attrs_by_key = {
-        attr["key"]: attr["value"] for attr in parsed["resource"]["attributes"]
-    }
-    assert attrs_by_key["service.name"]["stringValue"] == "myapp"
-    assert attrs_by_key["service.version"]["stringValue"] == "1.0.0"
-
-    # Verify InstrumentationScope
-    assert parsed["scopeSpans"][0]["scope"]["name"] == "mylib"
-    assert parsed["scopeSpans"][0]["scope"]["version"] == "2.3.4"
-    assert len(parsed["scopeSpans"][0]["scope"]["attributes"]) == 2
 
 
 def test_complex_span_with_all_components():

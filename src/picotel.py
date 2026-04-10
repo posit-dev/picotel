@@ -936,22 +936,51 @@ class _AsyncSender:
 class _SyncSender:
     """Synchronous sender that executes callables immediately.
 
-    Used when ``PICOTEL_ASYNC`` is set to ``false``. Useful for debugging
+    Used when ``PICOTEL_ASYNC`` is not enabled.  Useful for debugging
     and environments where background threads are undesirable.
 
     Matches ``_AsyncSender`` exception behaviour: config errors are logged,
     all other exceptions are suppressed silently.
+
+    Circuit breaker
+    ---------------
+    Network errors (``send_spans`` / ``send_logs`` returning ``False``) are
+    counted.  After ``_MAX_CONSECUTIVE_ERRORS`` consecutive failures the
+    sender trips and silently drops all subsequent work, preventing a
+    stuck or slow collector from blocking the process indefinitely.
+    A successful send resets the counter.
     """
 
     _thread = None
+    _MAX_CONSECUTIVE_ERRORS = 5
+
+    def __init__(self) -> None:
+        self._consecutive_errors = 0
+        self._tripped = False
 
     def is_alive(self) -> bool:
-        return True
+        return not self._tripped
 
     def submit(self, fn: Any, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
-        """Execute *fn* synchronously. Always returns True."""
+        """Execute *fn* synchronously.
+
+        Returns False when the circuit breaker has tripped.
+        """
+        if self._tripped:
+            return False
         try:
-            fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
+            if result is False:
+                self._consecutive_errors += 1
+                if self._consecutive_errors >= self._MAX_CONSECUTIVE_ERRORS:
+                    self._tripped = True
+                    _logger.error(
+                        f"Telemetry send failed {self._MAX_CONSECUTIVE_ERRORS}"
+                        " times consecutively, further sends are disabled"
+                    )
+                    return False
+            else:
+                self._consecutive_errors = 0
         except PicotelConfigError as e:
             _logger.error(f"Telemetry config error: {e}")  # noqa: TRY400
         except Exception:  # noqa: S110

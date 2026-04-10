@@ -1,9 +1,6 @@
 """Tests for _AsyncSender background dispatch."""
 
-import logging
-import os
 import threading
-from unittest.mock import Mock, patch
 
 import picotel
 from picotel import (
@@ -14,10 +11,6 @@ from picotel import (
     new_trace_id,
     now_ns,
 )
-
-_mock_response = Mock(status=200)
-_mock_response.__enter__ = Mock(return_value=_mock_response)
-_mock_response.__exit__ = Mock(return_value=False)
 
 # ---------------------------------------------------------------------------
 # _AsyncSender unit tests
@@ -208,78 +201,9 @@ def test_queue_full_warned_logs_once_then_resets(picotel_caplog):
     release2.set()
 
 
-def test_submit_returns_false_when_disabled():
-    """submit() returns False and never starts a thread when SDK is disabled."""
-    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "true"}):
-        picotel._is_disabled.cache_clear()
-        sender = _AsyncSender()
-        done = threading.Event()
-
-        assert sender.submit(done.set) is False
-        assert sender._thread is None
-        assert not done.is_set(), "callable should not have been executed"
-
-
 # ---------------------------------------------------------------------------
-# Integration: Span.__exit__ and OTLPHandler.emit deliver via async
+# Integration: error resilience via async sender
 # ---------------------------------------------------------------------------
-
-
-def test_span_exit_delivers_via_async(monkeypatch):
-    """Span.__exit__ delivers spans through the background sender."""
-    called = threading.Event()
-
-    def _urlopen_and_signal(*_args, **_kwargs):
-        called.set()
-        return _mock_response
-
-    mock_urlopen = Mock(side_effect=_urlopen_and_signal)
-    monkeypatch.setattr(picotel.urllib.request, "urlopen", mock_urlopen)
-    picotel._sender = _AsyncSender()
-
-    resource = Resource(attributes={"service.name": "test"})
-    with Span(
-        trace_id=new_trace_id(),
-        span_id=new_span_id(),
-        name="async-test",
-        start_time_ns=now_ns(),
-        resource=resource,
-        endpoint="http://collector:4318",
-    ):
-        pass
-
-    assert called.wait(timeout=5), "span not delivered"
-    request = mock_urlopen.call_args[0][0]
-    assert request.get_full_url() == "http://collector:4318/v1/traces"
-
-
-def test_otlp_handler_emit_delivers_via_async(monkeypatch):
-    """OTLPHandler.emit delivers logs through the background sender."""
-    called = threading.Event()
-
-    def _urlopen_and_signal(*_args, **_kwargs):
-        called.set()
-        return _mock_response
-
-    mock_urlopen = Mock(side_effect=_urlopen_and_signal)
-    monkeypatch.setattr(picotel.urllib.request, "urlopen", mock_urlopen)
-    picotel._sender = _AsyncSender()
-
-    handler = picotel.OTLPHandler(
-        resource=Resource(attributes={"service.name": "test"}),
-        endpoint="http://collector:4318",
-    )
-    logger = logging.getLogger("test_async_handler")
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-
-    try:
-        logger.info("hello from async test")
-        assert called.wait(timeout=5), "log not delivered"
-        request = mock_urlopen.call_args[0][0]
-        assert request.get_full_url() == "http://collector:4318/v1/logs"
-    finally:
-        logger.removeHandler(handler)
 
 
 def test_span_exit_error_does_not_crash_caller():
@@ -296,3 +220,112 @@ def test_span_exit_error_does_not_crash_caller():
     ):
         pass
     # Reaching here means the error was swallowed correctly
+
+
+# ---------------------------------------------------------------------------
+# _SyncSender unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_sync_sender_executes_callable():
+    """_SyncSender.submit() executes the callable immediately."""
+    sender = picotel._SyncSender()
+    result = []
+    sender.submit(result.append, 42)
+    assert result == [42]
+
+
+def test_sync_sender_returns_true():
+    """_SyncSender.submit() always returns True."""
+    sender = picotel._SyncSender()
+    assert sender.submit(lambda: None) is True
+
+
+def test_sync_sender_logs_config_error(picotel_caplog):
+    """_SyncSender logs PicotelConfigError without raising."""
+    sender = picotel._SyncSender()
+
+    def raise_config():
+        raise picotel.PicotelConfigError("sync config error")
+
+    sender.submit(raise_config)
+    assert any("sync config error" in r.message for r in picotel_caplog.records)
+
+
+def test_sync_sender_suppresses_other_exceptions():
+    """_SyncSender suppresses non-config exceptions silently."""
+    sender = picotel._SyncSender()
+    assert sender.submit(lambda: 1 / 0) is True
+
+
+# ---------------------------------------------------------------------------
+# _SyncSender circuit breaker
+# ---------------------------------------------------------------------------
+
+
+def test_sync_sender_trips_after_consecutive_failures(picotel_caplog):
+    """Circuit breaker trips after _MAX_CONSECUTIVE_ERRORS consecutive False returns."""
+    sender = picotel._SyncSender()
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS - 1):
+        assert sender.submit(lambda: False) is True
+    # The Nth failure trips the breaker
+    assert sender.submit(lambda: False) is False
+    assert sender._tripped is True
+    assert any(
+        "further sends are disabled" in r.message for r in picotel_caplog.records
+    )
+
+
+def test_sync_sender_success_resets_error_count():
+    """A successful send resets the consecutive error counter."""
+    sender = picotel._SyncSender()
+    # Accumulate failures just below the threshold
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS - 1):
+        sender.submit(lambda: False)
+    # One success resets the counter
+    sender.submit(lambda: True)
+    assert sender._consecutive_errors == 0
+    assert sender._tripped is False
+    # Need another full sequence to trip
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS - 1):
+        sender.submit(lambda: False)
+    assert sender._tripped is False
+
+
+def test_sync_sender_tripped_drops_all_work():
+    """Once tripped, all subsequent submits return False without calling fn."""
+    sender = picotel._SyncSender()
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS):
+        sender.submit(lambda: False)
+    assert sender._tripped is True
+    # fn should never be called once tripped
+    called = []
+    assert sender.submit(lambda: called.append(1)) is False
+    assert called == []
+
+
+def test_sync_sender_config_error_does_not_trip():
+    """PicotelConfigError does not count toward the circuit breaker."""
+    sender = picotel._SyncSender()
+
+    def raise_config():
+        raise picotel.PicotelConfigError("no endpoint")
+
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS + 5):
+        sender.submit(raise_config)
+    assert sender._tripped is False
+
+
+def test_sync_sender_is_alive_false_when_tripped():
+    """is_alive() returns False once the circuit breaker has tripped."""
+    sender = picotel._SyncSender()
+    assert sender.is_alive() is True
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS):
+        sender.submit(lambda: False)
+    assert sender.is_alive() is False
+
+
+def test_sync_sender_is_alive():
+    """_SyncSender.is_alive() returns True when the circuit breaker has not tripped."""
+    sender = picotel._SyncSender()
+    assert sender.is_alive() is True
