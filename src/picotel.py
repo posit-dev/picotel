@@ -206,7 +206,8 @@ class Span:
         """Exit the context manager, setting end_time_ns and sending the span."""
         if self.end_time_ns is None:
             self.end_time_ns = now_ns()
-        # Try to send if we have resource (send_spans handles endpoint/disabled)
+        if _is_disabled():
+            return
         endpoint = self.endpoint or None
         resource = self.resource or _get_resource_from_env()
         if resource:
@@ -394,6 +395,8 @@ class OTLPHandler(logging.Handler):
 
         :param record: The log record to export
         """
+        if _is_disabled():
+            return
         try:
             # Map Python log level to OTLP severity number
             if record.levelno <= logging.DEBUG:
@@ -891,9 +894,10 @@ class _AsyncSender:
         )
 
     def submit(self, fn: Any, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
-        """Queue a callable for background execution. Returns False if queue is full."""
-        if _is_disabled():
-            return False
+        """Queue a callable for background execution.
+
+        Returns False if the queue is full.
+        """
         if not self.is_alive():
             with self._lock:
                 if not self.is_alive():
@@ -929,7 +933,49 @@ class _AsyncSender:
                 pass
 
 
-_sender = _AsyncSender()
+class _SyncSender:
+    """Synchronous sender that executes callables immediately.
+
+    Used when ``PICOTEL_ASYNC`` is set to ``false``. Useful for debugging
+    and environments where background threads are undesirable.
+
+    Matches ``_AsyncSender`` exception behaviour: config errors are logged,
+    all other exceptions are suppressed silently.
+    """
+
+    _thread = None
+
+    def is_alive(self) -> bool:
+        return True
+
+    def submit(self, fn: Any, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
+        """Execute *fn* synchronously. Always returns True."""
+        try:
+            fn(*args, **kwargs)
+        except PicotelConfigError as e:
+            _logger.error(f"Telemetry config error: {e}")  # noqa: TRY400
+        except Exception:  # noqa: S110
+            pass
+        return True
+
+
+def _get_sender() -> _AsyncSender | _SyncSender:
+    """Return a sender based on the ``PICOTEL_ASYNC`` environment variable.
+
+    Defaults to ``_SyncSender`` (immediate, blocking execution).
+    Set ``PICOTEL_ASYNC`` to ``true`` or ``1`` to use ``_AsyncSender``
+    (background thread dispatch).
+
+    Called once at import time under the Python import lock, so there is
+    no race between threads that import the module concurrently.
+    Changing the variable after import has no effect.
+    """
+    if os.environ.get("PICOTEL_ASYNC", "").lower() in ("true", "1"):
+        return _AsyncSender()
+    return _SyncSender()
+
+
+_sender = _get_sender()
 
 
 @functools.lru_cache(maxsize=None)
