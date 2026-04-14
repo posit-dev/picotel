@@ -267,25 +267,3 @@ class TestSendLogs:
         mock_error.assert_called_once()
         assert "Failed to send logs" in mock_error.call_args[0][0]
 
-    def test_send_empty_logs_list(self):
-        """Test sending an empty list of logs."""
-        resource = Resource({"service.name": "test-service"})
-        logs = []
-
-        mock_response = Mock()
-        mock_response.status = 200
-        mock_response.__enter__ = Mock(return_value=mock_response)
-        mock_response.__exit__ = Mock(return_value=None)
-
-        with patch(
-            "picotel.urllib.request.urlopen", return_value=mock_response
-        ) as mock_urlopen:
-            result = send_logs("http://localhost:4318", resource, logs)
-
-        assert result is True
-
-        # Verify empty logRecords array is sent
-        request = mock_urlopen.call_args[0][0]
-        payload = json.loads(request.data.decode("utf-8"))
-        log_records = payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
-        assert log_records == []

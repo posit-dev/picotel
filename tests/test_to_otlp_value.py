@@ -61,6 +61,12 @@ def test_large_integer():
     assert result == {"intValue": "9223372036854775807"}
 
 
+def test_bytes_value_base64_encoded():
+    """Bytes values are base64-encoded per OTLP spec."""
+    result = _to_otlp_value(b"\x00\x01\x02")
+    assert result == {"bytesValue": "AAEC"}
+
+
 def test_unknown_type_fallback():
     """Test that unknown types fallback to string representation."""
 

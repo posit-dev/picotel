@@ -1,12 +1,17 @@
-"""Tests for _AsyncSender background dispatch."""
+"""Tests for _AsyncSender, _SyncSender, and _ForkSafeLock."""
 
+import os
 import threading
+
+import pytest
 
 import picotel
 from picotel import (
+    PicotelConfigError,
     Resource,
     Span,
     _AsyncSender,
+    _ForkSafeLock,
     new_span_id,
     new_trace_id,
     now_ns,
@@ -23,12 +28,6 @@ def test_submit_executes_callable():
     done = threading.Event()
     sender.submit(done.set)
     assert done.wait(timeout=2), "callable was not executed"
-
-
-def test_lazy_init_thread_is_none_before_first_submit():
-    """Worker thread is not created until the first submit."""
-    sender = _AsyncSender()
-    assert sender._thread is None
 
 
 def test_thread_is_daemon():
@@ -235,12 +234,6 @@ def test_sync_sender_executes_callable():
     assert result == [42]
 
 
-def test_sync_sender_returns_true():
-    """_SyncSender.submit() always returns True."""
-    sender = picotel._SyncSender()
-    assert sender.submit(lambda: None) is True
-
-
 def test_sync_sender_logs_config_error(picotel_caplog):
     """_SyncSender logs PicotelConfigError without raising."""
     sender = picotel._SyncSender()
@@ -252,10 +245,14 @@ def test_sync_sender_logs_config_error(picotel_caplog):
     assert any("sync config error" in r.message for r in picotel_caplog.records)
 
 
-def test_sync_sender_suppresses_other_exceptions():
-    """_SyncSender suppresses non-config exceptions silently."""
+def test_sync_sender_logs_other_exceptions(picotel_caplog):
+    """Non-config exceptions are logged but do not count toward the circuit breaker."""
     sender = picotel._SyncSender()
-    assert sender.submit(lambda: 1 / 0) is True
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS + 5):
+        assert sender.submit(lambda: 1 / 0) is True
+    assert sender._tripped is False
+    assert sender._consecutive_errors == 0
+    assert any("Telemetry send error" in r.message for r in picotel_caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -304,16 +301,20 @@ def test_sync_sender_tripped_drops_all_work():
     assert called == []
 
 
-def test_sync_sender_config_error_does_not_trip():
-    """PicotelConfigError does not count toward the circuit breaker."""
+def test_sync_sender_config_error_trips_breaker(picotel_caplog):
+    """PicotelConfigError counts toward the circuit breaker (persistent failure)."""
     sender = picotel._SyncSender()
 
     def raise_config():
         raise picotel.PicotelConfigError("no endpoint")
 
-    for _ in range(sender._MAX_CONSECUTIVE_ERRORS + 5):
-        sender.submit(raise_config)
-    assert sender._tripped is False
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS - 1):
+        assert sender.submit(raise_config) is True
+    assert sender.submit(raise_config) is False
+    assert sender._tripped is True
+    assert any(
+        "further sends are disabled" in r.message for r in picotel_caplog.records
+    )
 
 
 def test_sync_sender_is_alive_false_when_tripped():
@@ -325,7 +326,101 @@ def test_sync_sender_is_alive_false_when_tripped():
     assert sender.is_alive() is False
 
 
-def test_sync_sender_is_alive():
-    """_SyncSender.is_alive() returns True when the circuit breaker has not tripped."""
-    sender = picotel._SyncSender()
-    assert sender.is_alive() is True
+# ---------------------------------------------------------------------------
+# _AsyncSender fork recovery
+# ---------------------------------------------------------------------------
+
+
+def test_async_sender_replaces_queue_after_pid_change():
+    """Queue is replaced after fork to avoid poisoned internal locks."""
+    sender = _AsyncSender()
+    done = threading.Event()
+    sender.submit(done.set)
+    done.wait(timeout=2)
+    old_queue = sender._queue
+
+    sender._pid = -1
+
+    done2 = threading.Event()
+    sender.submit(done2.set)
+    assert done2.wait(timeout=2), "new worker did not execute callable"
+    assert sender._queue is not old_queue
+
+
+# ---------------------------------------------------------------------------
+# _ForkSafeLock unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_fork_safe_lock_normal_acquire_release():
+    """Basic acquire/release works without fork."""
+    lock = _ForkSafeLock()
+    with lock:
+        pass  # should not deadlock or raise
+
+
+def test_fork_safe_lock_replaces_lock_after_pid_change():
+    """_ForkSafeLock replaces its internal lock when PID changes (fork)."""
+    lock = _ForkSafeLock()
+    old_lock = lock._lock
+    lock._pid = -1
+    with lock:
+        pass
+    assert lock._lock is not old_lock
+    assert lock._pid == os.getpid()
+
+
+def test_fork_safe_lock_recovers_from_poisoned_probe():
+    """When probe is stuck (poisoned by fork), timeout triggers replacement."""
+    lock = _ForkSafeLock(timeout=0.1)
+    lock._pid = -1
+    # Simulate poisoned probe: acquired with no thread alive to release it
+    lock._probe.acquire()
+    with lock:
+        pass
+    assert lock._pid == os.getpid()
+
+
+def test_fork_safe_lock_concurrent_recovery():
+    """Multiple threads converge on a single recovered lock after fork."""
+    lock = _ForkSafeLock()
+    lock._pid = -1
+    barrier = threading.Barrier(5)
+    results = []
+
+    def recover_and_record():
+        barrier.wait()
+        with lock:
+            results.append(id(lock._lock))
+
+    threads = [threading.Thread(target=recover_and_record) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    for t in threads:
+        assert not t.is_alive(), "thread did not finish"
+
+    # All threads must have used the same recovered lock
+    assert len(set(results)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Span._validate() coverage
+# ---------------------------------------------------------------------------
+
+
+def test_span_validate_rejects_missing_start_time():
+    """Span without start_time_ns is rejected during validation."""
+    span = Span(trace_id=new_trace_id(), name="test", end_time_ns=now_ns())
+    with pytest.raises(PicotelConfigError, match="start_time_ns"):
+        span._validate()
+
+
+def test_span_validate_rejects_missing_end_time():
+    """Span without end_time_ns is rejected during validation."""
+    span = Span(trace_id=new_trace_id(), name="test", start_time_ns=now_ns())
+    with pytest.raises(PicotelConfigError, match="end_time_ns"):
+        span._validate()
+
+

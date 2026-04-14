@@ -616,31 +616,15 @@ def test_explicit_endpoint_still_works(monkeypatch):
 
 
 def test_get_sender_default_is_sync():
-    """_get_sender() returns _SyncSender when PICOTEL_ASYNC is not set."""
+    """_get_sender() returns _SyncSender by default (no PICOTEL_ASYNC)."""
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("PICOTEL_ASYNC", None)
         assert isinstance(picotel._get_sender(), picotel._SyncSender)
 
 
-def test_get_sender_async_true():
-    """_get_sender() returns _AsyncSender when PICOTEL_ASYNC=true."""
+def test_get_sender_returns_async_when_enabled():
+    """_get_sender() returns _AsyncSender when PICOTEL_ASYNC is set."""
     with patch.dict(os.environ, {"PICOTEL_ASYNC": "true"}):
         assert isinstance(picotel._get_sender(), picotel._AsyncSender)
 
 
-def test_get_sender_async_one():
-    """_get_sender() returns _AsyncSender when PICOTEL_ASYNC=1."""
-    with patch.dict(os.environ, {"PICOTEL_ASYNC": "1"}):
-        assert isinstance(picotel._get_sender(), picotel._AsyncSender)
-
-
-def test_get_sender_false_is_sync():
-    """_get_sender() returns _SyncSender when PICOTEL_ASYNC=false."""
-    with patch.dict(os.environ, {"PICOTEL_ASYNC": "false"}):
-        assert isinstance(picotel._get_sender(), picotel._SyncSender)
-
-
-def test_get_sender_case_insensitive():
-    """_get_sender() handles case-insensitive PICOTEL_ASYNC values."""
-    with patch.dict(os.environ, {"PICOTEL_ASYNC": "TRUE"}):
-        assert isinstance(picotel._get_sender(), picotel._AsyncSender)

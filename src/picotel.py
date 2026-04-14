@@ -213,15 +213,6 @@ class Span:
         if resource:
             _sender.submit(send_spans, endpoint, resource, [self], self.scope)
 
-    def _validate(self) -> None:
-        """Validate span has required fields set properly."""
-        if not self.trace_id:
-            raise PicotelConfigError("Span invalid: trace_id is empty")
-        if self.start_time_ns is None:
-            raise PicotelConfigError("Span invalid: start_time_ns is not set")
-        if self.end_time_ns is None:
-            raise PicotelConfigError("Span invalid: end_time_ns is not set")
-
     def send(
         self,
         endpoint: str | None = None,
@@ -247,6 +238,15 @@ class Span:
             return False
 
         return send_spans(endpoint, resource, [self], scope, timeout)
+
+    def _validate(self) -> None:
+        """Validate span has required fields set properly."""
+        if not self.trace_id:
+            raise PicotelConfigError("Span invalid: trace_id is empty")
+        if self.start_time_ns is None:
+            raise PicotelConfigError("Span invalid: start_time_ns is not set")
+        if self.end_time_ns is None:
+            raise PicotelConfigError("Span invalid: end_time_ns is not set")
 
 
 @dataclass
@@ -939,19 +939,20 @@ class _SyncSender:
     Used when ``PICOTEL_ASYNC`` is not enabled.  Useful for debugging
     and environments where background threads are undesirable.
 
-    Matches ``_AsyncSender`` exception behaviour: config errors are logged,
-    all other exceptions are suppressed silently.
+    All exceptions are logged.  Config errors and ``False`` returns are
+    persistent failures that count toward the circuit breaker.  Other
+    exceptions (bad attributes, serialization bugs) are transient caller
+    errors that are logged but do not count.
 
     Circuit breaker
     ---------------
-    Network errors (``send_spans`` / ``send_logs`` returning ``False``) are
-    counted.  After ``_MAX_CONSECUTIVE_ERRORS`` consecutive failures the
-    sender trips and silently drops all subsequent work, preventing a
-    stuck or slow collector from blocking the process indefinitely.
-    A successful send resets the counter.
+    Persistent failures (network errors returning ``False``, config errors)
+    are counted.  After ``_MAX_CONSECUTIVE_ERRORS`` consecutive persistent
+    failures the sender trips and silently drops all subsequent work,
+    preventing a stuck or slow collector from blocking the process
+    indefinitely.  A successful send resets the counter.
     """
 
-    _thread = None
     _MAX_CONSECUTIVE_ERRORS = 5
 
     def __init__(self) -> None:
@@ -968,23 +969,29 @@ class _SyncSender:
         """
         if self._tripped:
             return False
+        persistent_failure = False
         try:
             result = fn(*args, **kwargs)
             if result is False:
-                self._consecutive_errors += 1
-                if self._consecutive_errors >= self._MAX_CONSECUTIVE_ERRORS:
-                    self._tripped = True
-                    _logger.error(
-                        f"Telemetry send failed {self._MAX_CONSECUTIVE_ERRORS}"
-                        " times consecutively, further sends are disabled"
-                    )
-                    return False
+                persistent_failure = True
             else:
                 self._consecutive_errors = 0
         except PicotelConfigError as e:
             _logger.error(f"Telemetry config error: {e}")  # noqa: TRY400
-        except Exception:  # noqa: S110
-            pass
+            persistent_failure = True
+        except Exception as e:
+            # Transient caller errors (bad attributes, serialization bugs)
+            # are logged but not counted toward the circuit breaker.
+            _logger.error(f"Telemetry send error: {e}")  # noqa: TRY400
+        if persistent_failure:
+            self._consecutive_errors += 1
+            if self._consecutive_errors >= self._MAX_CONSECUTIVE_ERRORS:
+                self._tripped = True
+                _logger.error(
+                    f"Telemetry send failed {self._MAX_CONSECUTIVE_ERRORS}"
+                    " times consecutively, further sends are disabled"
+                )
+                return False
         return True
 
 

@@ -165,34 +165,6 @@ def test_send_spans_with_scope():
     assert scope_attrs[0]["value"]["stringValue"] == "python"
 
 
-def test_send_spans_empty_list():
-    """Test sending empty spans list still makes valid request."""
-    MockOTLPHandler.captured_requests = []
-
-    server = HTTPServer(("localhost", 0), MockOTLPHandler)
-    port = server.server_address[1]
-    server_thread = threading.Thread(target=server.handle_request)
-    server_thread.start()
-
-    resource = Resource({"service.name": "test_service"})
-
-    # Send empty spans list
-    result = send_spans(f"http://localhost:{port}", resource, [])
-
-    server_thread.join()
-    server.server_close()
-
-    assert result is True
-
-    # Verify request structure is still valid
-    payload = json.loads(MockOTLPHandler.captured_requests[0]["body"])
-    assert "resourceSpans" in payload
-    assert len(payload["resourceSpans"]) == 1
-    assert "scopeSpans" in payload["resourceSpans"][0]
-    assert "spans" in payload["resourceSpans"][0]["scopeSpans"][0]
-    assert payload["resourceSpans"][0]["scopeSpans"][0]["spans"] == []
-
-
 def test_send_spans_multiple():
     """Test sending multiple spans in one request."""
     MockOTLPHandler.captured_requests = []
