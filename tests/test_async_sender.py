@@ -422,5 +422,3 @@ def test_span_validate_rejects_missing_end_time():
     span = Span(trace_id=new_trace_id(), name="test", start_time_ns=now_ns())
     with pytest.raises(PicotelConfigError, match="end_time_ns"):
         span._validate()
-
-

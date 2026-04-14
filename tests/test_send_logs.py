@@ -266,4 +266,3 @@ class TestSendLogs:
         assert result is False
         mock_error.assert_called_once()
         assert "Failed to send logs" in mock_error.call_args[0][0]
-

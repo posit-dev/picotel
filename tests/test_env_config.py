@@ -626,5 +626,3 @@ def test_get_sender_returns_async_when_enabled():
     """_get_sender() returns _AsyncSender when PICOTEL_ASYNC is set."""
     with patch.dict(os.environ, {"PICOTEL_ASYNC": "true"}):
         assert isinstance(picotel._get_sender(), picotel._AsyncSender)
-
-
