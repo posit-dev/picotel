@@ -929,8 +929,8 @@ class _AsyncSender:
                 fn(*args, **kwargs)
             except PicotelConfigError as e:
                 _logger.error(f"Telemetry config error: {e}")  # noqa: TRY400
-            except Exception:  # noqa: S110
-                pass
+            except Exception as e:
+                _logger.error(f"Telemetry send error: {e}")  # noqa: TRY400
 
 
 class _SyncSender:
