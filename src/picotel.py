@@ -725,7 +725,7 @@ class _ForkSafeLock:
 
     *  **probe** — serializes fork recovery.  It detects its own
        poisoning via a timeout (the critical section it guards takes
-       microseconds; a 5 s timeout means the holder is a ghost thread).
+       microseconds; a 2 s timeout means the holder is a ghost thread).
        When poisoned, it is CAS-replaced: a fresh lock is written to
        ``self._probe`` only if no other thread already replaced it.
        After replacement, all threads retry and converge on the same
@@ -787,11 +787,11 @@ class _ForkSafeLock:
     :param float timeout: seconds to wait before declaring the probe
         poisoned.  Keep this well above the longest legitimate hold time
         but short enough that a poisoned lock doesn't stall the process
-        for too long.  Default is 5 s, vs. the sub-millisecond actual
+        for too long.  Default is 2 s, vs. the sub-millisecond actual
         hold time, so false positives are not a concern.
     """
 
-    def __init__(self, timeout: float = 5.0) -> None:
+    def __init__(self, timeout: float = 2.0) -> None:
         self._probe = threading.Lock()
         self._lock = threading.Lock()
         self._timeout = timeout
