@@ -1,5 +1,5 @@
 [run]
-source = src/picotel.py
+source = src
 
 [report]
 show_missing = true
