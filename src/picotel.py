@@ -13,7 +13,7 @@ Requires Python 3.8+ for:
 - dataclasses for clean data structures
 - from __future__ import annotations for type hint syntax
 
-Version: 0.1.2
+Version: 0.2.0dev
 Author: Alessandro Molina <alessandro.molina@posit.co>
 URL: https://github.com/posit-dev/picotel
 License: MIT
@@ -26,7 +26,9 @@ import functools
 import json
 import logging
 import os
+import queue
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -35,7 +37,13 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
 
+# Detached from root logger so that picotel errors (e.g. network failures)
+# don't feed back through an OTLPHandler attached to root, which would
+# create an infinite loop of failing sends.
 _logger = logging.getLogger("picotel")
+_logger.propagate = False
+_logger.handlers.clear()
+_logger.addHandler(logging.StreamHandler(sys.stderr))
 
 # Sentinel to read trace_id/parent_span_id from TRACEPARENT env var (W3C Trace Context)
 TRACEPARENT = object()
@@ -198,20 +206,12 @@ class Span:
         """Exit the context manager, setting end_time_ns and sending the span."""
         if self.end_time_ns is None:
             self.end_time_ns = now_ns()
-        # Try to send if we have resource (send_spans handles endpoint/disabled)
+        if _is_disabled():
+            return
         endpoint = self.endpoint or None
         resource = self.resource or _get_resource_from_env()
         if resource:
-            send_spans(endpoint, resource, [self], self.scope)
-
-    def _validate(self) -> None:
-        """Validate span has required fields set properly."""
-        if not self.trace_id:
-            raise PicotelConfigError("Span invalid: trace_id is empty")
-        if self.start_time_ns is None:
-            raise PicotelConfigError("Span invalid: start_time_ns is not set")
-        if self.end_time_ns is None:
-            raise PicotelConfigError("Span invalid: end_time_ns is not set")
+            _sender.submit(send_spans, endpoint, resource, [self], self.scope)
 
     def send(
         self,
@@ -238,6 +238,15 @@ class Span:
             return False
 
         return send_spans(endpoint, resource, [self], scope, timeout)
+
+    def _validate(self) -> None:
+        """Validate span has required fields set properly."""
+        if not self.trace_id:
+            raise PicotelConfigError("Span invalid: trace_id is empty")
+        if self.start_time_ns is None:
+            raise PicotelConfigError("Span invalid: start_time_ns is not set")
+        if self.end_time_ns is None:
+            raise PicotelConfigError("Span invalid: end_time_ns is not set")
 
 
 @dataclass
@@ -386,6 +395,8 @@ class OTLPHandler(logging.Handler):
 
         :param record: The log record to export
         """
+        if _is_disabled():
+            return
         try:
             # Map Python log level to OTLP severity number
             if record.levelno <= logging.DEBUG:
@@ -434,7 +445,7 @@ class OTLPHandler(logging.Handler):
             endpoint = self.endpoint or None
             resource = self.resource or _get_resource_from_env()
             if resource:
-                send_logs(endpoint, resource, [log], self.scope)
+                _sender.submit(send_logs, endpoint, resource, [log], self.scope)
         except Exception:
             # Don't let logging errors crash the application
             sys.stderr.write("failed to send log\n")
@@ -672,6 +683,335 @@ def send_logs(
 # -----------------------------------------------------------------------------
 # Internal helpers
 # -----------------------------------------------------------------------------
+
+
+class _ForkSafeLock:
+    """A lock that recovers from poisoning caused by ``os.fork()``.
+
+    The problem
+    -----------
+    When ``fork()`` happens while a thread holds a ``threading.Lock``,
+    the child process inherits the lock in its acquired state — but the
+    thread that held it does not exist in the child (POSIX guarantees
+    only the calling thread survives).  The lock is permanently stuck:
+    any attempt to acquire it deadlocks.  This is called a
+    **poisoned lock**.
+
+    ``os.register_at_fork`` does not help because it only fires for
+    Python-level ``os.fork()`` calls.  A C extension that calls
+    ``fork(2)`` directly (native DB drivers, compression libraries,
+    monitoring agents) bypasses the callbacks entirely.  PID comparison
+    is the only universal fork detector.
+
+    Why a naive fix doesn't work
+    ----------------------------
+    The obvious approach — detect PID mismatch, replace the lock —
+    has a race condition::
+
+        # BROKEN: multiple child threads can each create their own lock
+        if self._pid != os.getpid():
+            self._lock = threading.Lock()   # Thread A: self._lock = L_A
+                                            # Thread B: self._lock = L_B
+        with self._lock:                    # A holds L_A, B holds L_B
+            ...                             # both in critical section!
+
+    The child process might spawn threads before any of them calls this
+    code.  Multiple threads see the PID mismatch simultaneously, each
+    creates a private lock, and mutual exclusion is destroyed.
+
+    The design
+    ----------
+    Internally there are two locks with distinct roles:
+
+    *  **probe** — serializes fork recovery.  It detects its own
+       poisoning via a timeout (the critical section it guards takes
+       microseconds; a 2 s timeout means the holder is a ghost thread).
+       When poisoned, it is CAS-replaced: a fresh lock is written to
+       ``self._probe`` only if no other thread already replaced it.
+       After replacement, all threads retry and converge on the same
+       new probe via **verify-after-acquire** (see below).
+
+    *  **lock** — the actual mutex callers acquire via ``with``.
+       Replaced under probe protection when a fork is detected.
+       Callers never interact with the probe directly.
+
+    Normal (no-fork) path: one ``os.getpid()`` comparison + one
+    ``lock.acquire()``.  No timeout, no overhead.
+
+    Fork-recovery path: probe acquisition (with timeout-based
+    self-healing) → lock replacement → ``lock.acquire()``.
+
+    Verify-after-acquire: why it's correct
+    ---------------------------------------
+    The CAS on the probe (``if self._probe is probe``) is not atomic —
+    two threads can both check before either writes, so both may
+    replace.  That's fine.  The correctness comes from the step after
+    acquiring::
+
+        probe = self._probe             # snapshot the reference
+        if probe.acquire(timeout=5):    # acquire whatever we read
+            if self._probe is probe:    # ← VERIFY: still current?
+                ...                     # only then enter recovery
+            else:
+                probe.release()         # stale — retry
+                continue
+
+    If thread A acquired a lock that thread B replaced in the meantime,
+    the verify check (``self._probe is probe``) fails.  A releases the
+    stale lock and retries, reading the current ``self._probe``.
+
+    After CAS replacement, ``self._probe`` stabilises (fresh locks are
+    never poisoned, so no further CAS triggers).  All threads converge
+    on the same probe instance and serialize through it.  The first
+    thread in does the recovery; subsequent threads see
+    ``self._pid == os.getpid()`` and skip the replacement.
+
+    Worst-case loop iterations per thread: 2 (one timeout on the
+    poisoned probe, one successful acquire on the fresh replacement).
+    An extra iteration is possible if a thread reads a probe reference
+    between two CAS writes, but this converges immediately.
+
+    Why ``__exit__`` can use ``self._lock.release()`` directly
+    ----------------------------------------------------------
+    Once ``_recover()`` sets ``self._pid = os.getpid()``, no thread
+    will enter ``_recover()`` again (until the next fork).  So between
+    ``__enter__``'s acquire and ``__exit__``'s release, ``self._lock``
+    is stable — nobody is replacing it.
+
+    Write ordering matters: ``_recover()`` writes ``self._lock``
+    **before** ``self._pid``.  Any thread that sees the updated PID
+    (and therefore skips ``_recover()``) is guaranteed to also see the
+    new lock.  This holds under free-threaded Python (no GIL) too,
+    because CPython's per-attribute stores use release semantics.
+
+    :param float timeout: seconds to wait before declaring the probe
+        poisoned.  Keep this well above the longest legitimate hold time
+        but short enough that a poisoned lock doesn't stall the process
+        for too long.  Default is 2 s, vs. the sub-millisecond actual
+        hold time, so false positives are not a concern.
+    """
+
+    def __init__(self, timeout: float = 2.0) -> None:
+        self._probe = threading.Lock()
+        self._lock = threading.Lock()
+        self._timeout = timeout
+        self._pid = os.getpid()
+
+    def __enter__(self) -> _ForkSafeLock:
+        if self._pid != os.getpid():
+            self._recover()
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *_: Any) -> None:  # noqa: ANN401
+        self._lock.release()
+
+    def _recover(self) -> None:
+        while True:
+            probe = self._probe
+            if probe.acquire(timeout=self._timeout):
+                if self._probe is probe:
+                    # We hold the current probe — sole thread in recovery.
+                    # Replace _lock BEFORE updating _pid: any thread that
+                    # later sees the new PID is guaranteed to see the new
+                    # lock (write ordering, see class docstring).
+                    try:
+                        if self._pid != os.getpid():
+                            self._lock = threading.Lock()
+                            self._pid = os.getpid()
+                    finally:
+                        probe.release()
+                    return
+                # Acquired a probe that another thread already replaced.
+                # The verify-after-acquire check (self._probe is probe)
+                # caught the stale reference.  Release and retry with the
+                # current probe so all threads converge on one instance.
+                probe.release()
+                continue
+            # Timed out: the probe is poisoned (its holder died in fork).
+            # CAS-replace: only overwrite if nobody else already did.
+            # Non-atomic CAS is fine — if two threads both replace, the
+            # last writer wins and all threads converge on that instance
+            # in the next loop iteration (verify-after-acquire catches
+            # anyone who acquired a now-stale replacement).
+            if self._probe is probe:
+                self._probe = threading.Lock()
+
+
+class _AsyncSender:
+    """Background sender that dispatches callables on a daemon thread.
+
+    Fire-and-forget callers (``Span.__exit__``, ``OTLPHandler.emit``)
+    submit work here so the calling thread is never blocked by slow or
+    unreachable collectors.
+
+    Fork safety
+    -----------
+    After ``os.fork()``, three things inherited by the child are broken:
+
+    1. **Stale thread** — the ``_thread`` object exists but the OS thread
+       doesn't (POSIX: only the calling thread survives fork).
+       ``is_alive()`` detects this via PID comparison.
+
+    2. **Poisoned lock** — if ``self._lock`` was held at fork time, it's
+       permanently stuck.  ``_ForkSafeLock`` detects this via timeout and
+       replaces the lock transparently.  See its docstring for the full
+       correctness argument.
+
+    3. **Poisoned queue** — ``queue.Queue`` uses internal locks that can
+       also be poisoned.  The queue is replaced inside ``submit()``'s
+       critical section before the new worker reads from it.
+       ``queue.maxsize`` is a plain attribute (not lock-protected), so
+       reading it from a poisoned queue to size the replacement is safe.
+
+    ``submit()`` itself is textbook double-checked locking with no
+    fork-specific logic — all fork recovery is encapsulated in
+    ``_ForkSafeLock``.
+    """
+
+    def __init__(self, maxsize: int = 256) -> None:
+        self._queue: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._thread: threading.Thread | None = None
+        self._pid: int = 0
+        self._lock = _ForkSafeLock()
+        self._queue_full_warned = False
+
+    def is_alive(self) -> bool:
+        """Return True if the background worker is running in this process.
+
+        The PID check is the primary fork detector: after ``os.fork()``
+        the child inherits ``_thread`` but the actual OS thread only
+        exists in the parent.  ``Thread.is_alive()`` can still report
+        True in the child because its internal lock state is copied
+        as-is during fork, so PID comparison is the reliable signal.
+        ~200 ns per call (vDSO read, not a syscall), negligible vs. the
+        ~0.5 ms HTTP send it guards.
+        """
+        return (
+            self._thread is not None
+            and self._thread.is_alive()
+            and self._pid == os.getpid()
+        )
+
+    def submit(self, fn: Any, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
+        """Queue a callable for background execution.
+
+        Returns False if the queue is full.
+        """
+        if not self.is_alive():
+            with self._lock:
+                if not self.is_alive():
+                    # Replace the queue: its internal locks may be
+                    # poisoned after fork (same issue as self._lock,
+                    # but handled here rather than in _ForkSafeLock
+                    # because the queue is _AsyncSender's concern).
+                    self._queue = queue.Queue(maxsize=self._queue.maxsize)
+                    self._queue_full_warned = False
+                    t = threading.Thread(target=self._worker, daemon=True)
+                    t.start()
+                    self._thread = t
+                    self._pid = os.getpid()
+        try:
+            self._queue.put_nowait((fn, args, kwargs))
+        except queue.Full:
+            if not self._queue_full_warned:
+                _logger.error("Telemetry send queue full, signals are being dropped")  # noqa: TRY400
+                self._queue_full_warned = True
+            return False
+        else:
+            self._queue_full_warned = False
+            return True
+
+    def _worker(self) -> None:
+        while True:
+            fn, args, kwargs = self._queue.get()
+            try:
+                fn(*args, **kwargs)
+            except PicotelConfigError as e:
+                _logger.error(f"Telemetry config error: {e}")  # noqa: TRY400
+            except Exception as e:
+                _logger.error(f"Telemetry send error: {e}")  # noqa: TRY400
+
+
+class _SyncSender:
+    """Synchronous sender that executes callables immediately.
+
+    Used when ``PICOTEL_ASYNC`` is not enabled.  Useful for debugging
+    and environments where background threads are undesirable.
+
+    All exceptions are logged.  Config errors and ``False`` returns are
+    persistent failures that count toward the circuit breaker.  Other
+    exceptions (bad attributes, serialization bugs) are transient caller
+    errors that are logged but do not count.
+
+    Circuit breaker
+    ---------------
+    Persistent failures (network errors returning ``False``, config errors)
+    are counted.  After ``_MAX_CONSECUTIVE_ERRORS`` consecutive persistent
+    failures the sender trips and silently drops all subsequent work,
+    preventing a stuck or slow collector from blocking the process
+    indefinitely.  A successful send resets the counter.
+    """
+
+    _MAX_CONSECUTIVE_ERRORS = 5
+
+    def __init__(self) -> None:
+        self._consecutive_errors = 0
+        self._tripped = False
+
+    def is_alive(self) -> bool:
+        return not self._tripped
+
+    def submit(self, fn: Any, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
+        """Execute *fn* synchronously.
+
+        Returns False when the circuit breaker has tripped.
+        """
+        if self._tripped:
+            return False
+        persistent_failure = False
+        try:
+            result = fn(*args, **kwargs)
+            if result is False:
+                persistent_failure = True
+            else:
+                self._consecutive_errors = 0
+        except PicotelConfigError as e:
+            _logger.error(f"Telemetry config error: {e}")  # noqa: TRY400
+            persistent_failure = True
+        except Exception as e:
+            # Transient caller errors (bad attributes, serialization bugs)
+            # are logged but not counted toward the circuit breaker.
+            _logger.error(f"Telemetry send error: {e}")  # noqa: TRY400
+        if persistent_failure:
+            self._consecutive_errors += 1
+            if self._consecutive_errors >= self._MAX_CONSECUTIVE_ERRORS:
+                self._tripped = True
+                _logger.error(
+                    f"Telemetry send failed {self._MAX_CONSECUTIVE_ERRORS}"
+                    " times consecutively, further sends are disabled"
+                )
+                return False
+        return True
+
+
+def _get_sender() -> _AsyncSender | _SyncSender:
+    """Return a sender based on the ``PICOTEL_ASYNC`` environment variable.
+
+    Defaults to ``_SyncSender`` (immediate, blocking execution).
+    Set ``PICOTEL_ASYNC`` to ``true`` or ``1`` to use ``_AsyncSender``
+    (background thread dispatch).
+
+    Called once at import time under the Python import lock, so there is
+    no race between threads that import the module concurrently.
+    Changing the variable after import has no effect.
+    """
+    if os.environ.get("PICOTEL_ASYNC", "").lower() in ("true", "1"):
+        return _AsyncSender()
+    return _SyncSender()
+
+
+_sender = _get_sender()
 
 
 @functools.lru_cache(maxsize=None)

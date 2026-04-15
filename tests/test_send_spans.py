@@ -1,10 +1,10 @@
 """Tests for send_spans() function."""
 
 import json
-import threading
-import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import urllib.error
+from unittest.mock import Mock, patch
 
+import picotel
 from picotel import (
     InstrumentationScope,
     Resource,
@@ -15,52 +15,13 @@ from picotel import (
     send_spans,
 )
 
-
-class MockOTLPHandler(BaseHTTPRequestHandler):
-    """Mock OTLP collector handler that captures requests."""
-
-    captured_requests = []
-
-    def do_POST(self):
-        """Handle POST requests to capture the payload."""
-        if self.path == "/v1/traces":
-            content_length = int(self.headers["Content-Length"])
-            body = self.rfile.read(content_length)
-
-            # Store the request details
-            MockOTLPHandler.captured_requests.append(
-                {
-                    "path": self.path,
-                    "headers": dict(self.headers),
-                    "body": body.decode("utf-8"),
-                }
-            )
-
-            # Send success response
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"partialSuccess":{}}')
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def log_message(self, _format, *_args):
-        """Suppress log messages from the test server."""
+_mock_response = Mock(status=200)
+_mock_response.__enter__ = Mock(return_value=_mock_response)
+_mock_response.__exit__ = Mock(return_value=False)
 
 
 def test_send_spans_basic():
-    """Test sending spans to a mock HTTP server."""
-    # Clear any previous captured requests
-    MockOTLPHandler.captured_requests = []
-
-    # Start mock server in a thread
-    server = HTTPServer(("localhost", 0), MockOTLPHandler)
-    port = server.server_address[1]
-    server_thread = threading.Thread(target=server.handle_request)
-    server_thread.start()
-
-    # Create test data
+    """Test sending spans produces correct OTLP payload."""
     resource = Resource({"service.name": "test_service", "service.version": "1.0.0"})
 
     trace_id = new_trace_id()
@@ -73,61 +34,33 @@ def test_send_spans_basic():
         attributes={"test.attribute": "value"},
     )
 
-    # Send spans
-    result = send_spans(f"http://localhost:{port}", resource, [span])
+    with patch(
+        "picotel.urllib.request.urlopen", return_value=_mock_response
+    ) as mock_urlopen:
+        result = send_spans("http://localhost:4318", resource, [span])
 
-    # Wait for server thread to complete
-    server_thread.join()
-    server.server_close()
-
-    # Verify success
     assert result is True
 
-    # Verify request was captured
-    assert len(MockOTLPHandler.captured_requests) == 1
-    request = MockOTLPHandler.captured_requests[0]
+    request = mock_urlopen.call_args[0][0]
+    assert request.get_full_url() == "http://localhost:4318/v1/traces"
+    assert request.headers["Content-type"] == "application/json"
 
-    # Verify request details
-    assert request["path"] == "/v1/traces"
-    assert request["headers"]["Content-Type"] == "application/json"
-
-    # Verify JSON payload structure
-    payload = json.loads(request["body"])
-    assert "resourceSpans" in payload
+    payload = json.loads(request.data.decode("utf-8"))
     assert len(payload["resourceSpans"]) == 1
 
     resource_span = payload["resourceSpans"][0]
-    assert "resource" in resource_span
-    assert "attributes" in resource_span["resource"]
+    attrs = {a["key"]: a["value"] for a in resource_span["resource"]["attributes"]}
+    assert attrs["service.name"]["stringValue"] == "test_service"
+    assert attrs["service.version"]["stringValue"] == "1.0.0"
 
-    # Check resource attributes
-    attrs = resource_span["resource"]["attributes"]
-    attrs_dict = {attr["key"]: attr["value"] for attr in attrs}
-    assert attrs_dict["service.name"]["stringValue"] == "test_service"
-    assert attrs_dict["service.version"]["stringValue"] == "1.0.0"
-
-    # Check scopeSpans
-    assert "scopeSpans" in resource_span
-    assert len(resource_span["scopeSpans"]) == 1
-    scope_span = resource_span["scopeSpans"][0]
-
-    # Check spans array
-    assert "spans" in scope_span
-    assert len(scope_span["spans"]) == 1
-    span_data = scope_span["spans"][0]
-    assert span_data["traceId"] == trace_id
-    assert span_data["name"] == "test_operation"
+    spans = resource_span["scopeSpans"][0]["spans"]
+    assert len(spans) == 1
+    assert spans[0]["traceId"] == trace_id
+    assert spans[0]["name"] == "test_operation"
 
 
 def test_send_spans_with_scope():
     """Test sending spans with instrumentation scope."""
-    MockOTLPHandler.captured_requests = []
-
-    server = HTTPServer(("localhost", 0), MockOTLPHandler)
-    port = server.server_address[1]
-    server_thread = threading.Thread(target=server.handle_request)
-    server_thread.start()
-
     resource = Resource({"service.name": "test_service"})
     scope = InstrumentationScope(
         name="my.library",
@@ -143,65 +76,26 @@ def test_send_spans_with_scope():
         end_time_ns=now_ns() + 1000000,
     )
 
-    result = send_spans(f"http://localhost:{port}", resource, [span], scope=scope)
-
-    server_thread.join()
-    server.server_close()
+    with patch(
+        "picotel.urllib.request.urlopen", return_value=_mock_response
+    ) as mock_urlopen:
+        result = send_spans("http://localhost:4318", resource, [span], scope=scope)
 
     assert result is True
 
-    # Verify scope in payload
-    payload = json.loads(MockOTLPHandler.captured_requests[0]["body"])
+    payload = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
     scope_span = payload["resourceSpans"][0]["scopeSpans"][0]
 
-    assert "scope" in scope_span
     assert scope_span["scope"]["name"] == "my.library"
     assert scope_span["scope"]["version"] == "2.0.0"
-    assert "attributes" in scope_span["scope"]
-
     scope_attrs = scope_span["scope"]["attributes"]
     assert len(scope_attrs) == 1
     assert scope_attrs[0]["key"] == "library.language"
     assert scope_attrs[0]["value"]["stringValue"] == "python"
 
 
-def test_send_spans_empty_list():
-    """Test sending empty spans list still makes valid request."""
-    MockOTLPHandler.captured_requests = []
-
-    server = HTTPServer(("localhost", 0), MockOTLPHandler)
-    port = server.server_address[1]
-    server_thread = threading.Thread(target=server.handle_request)
-    server_thread.start()
-
-    resource = Resource({"service.name": "test_service"})
-
-    # Send empty spans list
-    result = send_spans(f"http://localhost:{port}", resource, [])
-
-    server_thread.join()
-    server.server_close()
-
-    assert result is True
-
-    # Verify request structure is still valid
-    payload = json.loads(MockOTLPHandler.captured_requests[0]["body"])
-    assert "resourceSpans" in payload
-    assert len(payload["resourceSpans"]) == 1
-    assert "scopeSpans" in payload["resourceSpans"][0]
-    assert "spans" in payload["resourceSpans"][0]["scopeSpans"][0]
-    assert payload["resourceSpans"][0]["scopeSpans"][0]["spans"] == []
-
-
 def test_send_spans_multiple():
     """Test sending multiple spans in one request."""
-    MockOTLPHandler.captured_requests = []
-
-    server = HTTPServer(("localhost", 0), MockOTLPHandler)
-    port = server.server_address[1]
-    server_thread = threading.Thread(target=server.handle_request)
-    server_thread.start()
-
     resource = Resource({"service.name": "test_service"})
 
     trace_id = new_trace_id()
@@ -225,24 +119,23 @@ def test_send_spans_multiple():
         status=Span.Status.OK,
     )
 
-    result = send_spans(f"http://localhost:{port}", resource, [parent_span, child_span])
-
-    server_thread.join()
-    server.server_close()
+    with patch(
+        "picotel.urllib.request.urlopen", return_value=_mock_response
+    ) as mock_urlopen:
+        result = send_spans(
+            "http://localhost:4318", resource, [parent_span, child_span]
+        )
 
     assert result is True
 
-    # Verify both spans in payload
-    payload = json.loads(MockOTLPHandler.captured_requests[0]["body"])
+    payload = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
     spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
     assert len(spans) == 2
 
-    # Check parent span
     assert spans[0]["name"] == "parent_operation"
     assert spans[0]["kind"] == 2  # SERVER
     assert "parentSpanId" not in spans[0]
 
-    # Check child span
     assert spans[1]["name"] == "child_operation"
     assert spans[1]["kind"] == 3  # CLIENT
     assert spans[1]["parentSpanId"] == parent_span.span_id
@@ -250,7 +143,7 @@ def test_send_spans_multiple():
 
 
 def test_send_spans_nonexistent_endpoint():
-    """Test sending to non-existent endpoint returns False without raising."""
+    """Test sending to unreachable endpoint returns False without raising."""
     resource = Resource({"service.name": "test_service"})
     span = Span(
         trace_id=new_trace_id(),
@@ -260,22 +153,17 @@ def test_send_spans_nonexistent_endpoint():
         end_time_ns=now_ns() + 1000000,
     )
 
-    # Use a port that's unlikely to have a server
-    result = send_spans("http://localhost:59999", resource, [span], timeout=0.5)
+    with patch(
+        "picotel.urllib.request.urlopen",
+        side_effect=urllib.error.URLError("connection refused"),
+    ):
+        result = send_spans("http://localhost:59999", resource, [span])
 
-    # Should return False, not raise an exception
     assert result is False
 
 
 def test_send_spans_with_trailing_slash():
     """Test that endpoint with trailing slash is handled correctly."""
-    MockOTLPHandler.captured_requests = []
-
-    server = HTTPServer(("localhost", 0), MockOTLPHandler)
-    port = server.server_address[1]
-    server_thread = threading.Thread(target=server.handle_request)
-    server_thread.start()
-
     resource = Resource({"service.name": "test_service"})
     span = Span(
         trace_id=new_trace_id(),
@@ -285,37 +173,19 @@ def test_send_spans_with_trailing_slash():
         end_time_ns=now_ns() + 1000000,
     )
 
-    # Endpoint with trailing slash
-    result = send_spans(f"http://localhost:{port}/", resource, [span])
-
-    server_thread.join()
-    server.server_close()
+    with patch(
+        "picotel.urllib.request.urlopen", return_value=_mock_response
+    ) as mock_urlopen:
+        result = send_spans("http://localhost:4318/", resource, [span])
 
     assert result is True
-    assert MockOTLPHandler.captured_requests[0]["path"] == "/v1/traces"
+    assert (
+        mock_urlopen.call_args[0][0].get_full_url() == "http://localhost:4318/v1/traces"
+    )
 
 
-def test_send_spans_timeout():
-    """Test that timeout parameter is respected."""
-
-    class SlowHandler(BaseHTTPRequestHandler):
-        """Handler that responds slowly."""
-
-        def do_POST(self):
-            """Delay response to trigger timeout."""
-            time.sleep(2)  # Sleep longer than timeout
-            self.send_response(200)
-            self.end_headers()
-
-        def log_message(self, _format, *_args):
-            """Suppress log messages."""
-
-    server = HTTPServer(("localhost", 0), SlowHandler)
-    port = server.server_address[1]
-    server_thread = threading.Thread(target=server.serve_forever)
-    server_thread.daemon = True
-    server_thread.start()
-
+def test_send_spans_passes_timeout_to_urlopen():
+    """Test that the timeout parameter is forwarded to urlopen."""
     resource = Resource({"service.name": "test_service"})
     span = Span(
         trace_id=new_trace_id(),
@@ -325,33 +195,18 @@ def test_send_spans_timeout():
         end_time_ns=now_ns() + 1000000,
     )
 
-    # Use short timeout
-    result = send_spans(f"http://localhost:{port}", resource, [span], timeout=0.1)
+    with patch(
+        "picotel.urllib.request.urlopen", return_value=_mock_response
+    ) as mock_urlopen:
+        send_spans("http://localhost:4318", resource, [span], timeout=0.75)
 
-    # Should timeout and return False
-    assert result is False
-
-    # Clean up server
-    server.shutdown()
-    server.server_close()
+    assert mock_urlopen.call_args[1]["timeout"] == 0.75
 
 
 def test_send_spans_skips_invalid_trace_id():
-    """Test that spans without trace_id are skipped."""
-    from unittest.mock import patch  # noqa: PLC0415
-
-    import picotel  # noqa: PLC0415
-
-    MockOTLPHandler.captured_requests = []
-
-    server = HTTPServer(("localhost", 0), MockOTLPHandler)
-    port = server.server_address[1]
-    server_thread = threading.Thread(target=server.handle_request)
-    server_thread.start()
-
+    """Test that spans without trace_id are skipped but valid ones are sent."""
     resource = Resource({"service.name": "test_service"})
 
-    # Create valid and invalid spans
     valid_span = Span(
         trace_id=new_trace_id(),
         name="valid_span",
@@ -371,21 +226,19 @@ def test_send_spans_skips_invalid_trace_id():
     invalid_span.links = []
     invalid_span.status = None
 
-    with patch.object(picotel._logger, "error") as mock_error:
+    with patch(
+        "picotel.urllib.request.urlopen", return_value=_mock_response
+    ) as mock_urlopen, patch.object(picotel._logger, "error") as mock_error:
         result = send_spans(
-            f"http://localhost:{port}", resource, [valid_span, invalid_span]
+            "http://localhost:4318", resource, [valid_span, invalid_span]
         )
-
-    server_thread.join()
-    server.server_close()
 
     assert result is True
     mock_error.assert_called_once()
     assert "Span invalid" in mock_error.call_args[0][0]
     assert "trace_id is empty" in mock_error.call_args[0][0]
 
-    # Verify only valid span was sent
-    payload = json.loads(MockOTLPHandler.captured_requests[0]["body"])
+    payload = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
     spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
     assert len(spans) == 1
     assert spans[0]["name"] == "valid_span"

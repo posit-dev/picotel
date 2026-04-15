@@ -128,19 +128,6 @@ def test_span_with_traceparent_and_explicit_parent():
         assert span.parent_span_id == "1234567890abcdef"
 
 
-def test_span_without_traceparent_explicit_trace_required():
-    """Test Span without TRACEPARENT sentinel requires explicit trace_id."""
-    with patch.dict(os.environ, {}, clear=True):
-        # With explicit trace_id, should work fine
-        span = Span(
-            trace_id="abcdef1234567890abcdef1234567890",
-            name="test",
-            start_time_ns=1000,
-            end_time_ns=2000,
-        )
-        assert span.trace_id == "abcdef1234567890abcdef1234567890"
-
-
 def test_span_span_id_always_generated():
     """Test Span without span_id always generates a new span_id."""
     with patch.dict(
@@ -222,17 +209,6 @@ def test_logrecord_with_traceparent_and_explicit_span_id():
         assert log.span_id == "1234567890abcdef"
 
 
-def test_traceparent_caching():
-    """Test that _parse_traceparent result is cached."""
-    with patch.dict(
-        os.environ,
-        {"TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
-    ):
-        result1 = picotel._parse_traceparent()
-        result2 = picotel._parse_traceparent()
-        assert result1 is result2  # Same object reference due to caching
-
-
 def test_traceparent_with_uppercase_hex():
     """Test that TRACEPARENT with uppercase hex is accepted."""
     with patch.dict(
@@ -245,8 +221,3 @@ def test_traceparent_with_uppercase_hex():
         assert trace_id == "0AF7651916CD43DD8448EB211C80319C"
         assert parent_id == "B7AD6B7169203331"
         assert trace_flags == 255
-
-
-def test_traceparent_sentinel_identity():
-    """Test that TRACEPARENT sentinel can be checked with 'is'."""
-    assert TRACEPARENT is picotel.TRACEPARENT

@@ -180,6 +180,9 @@ export PICOTEL_SERVICE_NAME=my-service  # or OTEL_SERVICE_NAME
 
 # Optional headers
 export PICOTEL_EXPORTER_OTLP_HEADERS="api-key=secret,x-custom=value"
+
+# Sending mode (see "Sending Modes" below)
+export PICOTEL_ASYNC=true  # background thread dispatch; omit for synchronous
 ```
 
 ### Disabling picotel
@@ -250,6 +253,43 @@ The prefix replaces the `OTEL_` portion of each standard variable name.
 Non-`OTEL_` names like `TRACEPARENT` get the prefix prepended
 (`PICOTEL_TRACEPARENT`).
 
+## Sending Modes
+
+picotel supports two sending modes: **synchronous** (default) and **asynchronous**. The mode is selected at import time via the `PICOTEL_ASYNC` environment variable.
+
+### Synchronous (default)
+
+```bash
+# No env var needed — sync is the default
+unset PICOTEL_ASYNC
+```
+
+Telemetry is sent inline on the calling thread. This is the simplest mode and is ideal for short-lived scripts, CLI tools, and environments where background threads are undesirable (some serverless runtimes, `fork()`-heavy process models).
+
+**Error handling — circuit breaker:** If the collector is unreachable, each send blocks until the HTTP timeout expires (default 2 s). After **5 consecutive send failures**, picotel trips an internal circuit breaker and silently drops all subsequent telemetry for the lifetime of the process. This prevents a down collector from adding unbounded latency to every operation.
+
+### Asynchronous
+
+```bash
+export PICOTEL_ASYNC=true   # or PICOTEL_ASYNC=1
+```
+
+Telemetry is dispatched to a background daemon thread via an internal queue, so the calling thread is never blocked by slow or unreachable collectors. This is the recommended mode for long-running services where latency matters.
+
+**Error handling — queue back-pressure:** If the background thread cannot keep up (e.g. the collector is slow), the internal queue (256 entries) fills up and new signals are silently dropped. A single error-level message is logged per overflow episode. Once the queue drains, sending resumes normally.
+
+**Fork safety:** The async sender detects `os.fork()` and automatically recreates its thread and queue in the child process. This works even when fork is called from C extensions that bypass `os.register_at_fork`.
+
+### Choosing a mode
+
+| Concern | Synchronous | Asynchronous |
+|---|---|---|
+| Calling-thread latency | Blocked during HTTP send | Never blocked |
+| Error isolation | Circuit breaker after 5 failures | Queue drop on overflow |
+| Background threads | None | One daemon thread |
+| Fork safety | No special handling needed | Automatic recovery |
+| Best for | Scripts, CLIs, short-lived processes | Long-running services |
+
 ## Limitations / Non-Goals
 
 This library intentionally does **not** support:
@@ -259,7 +299,6 @@ This library intentionally does **not** support:
 - **Metrics** - Traces and logs only
 - **Sampling** - All spans are sent
 - **Batching** - Each call sends immediately
-- **Async export** - All exports are synchronous
 - **Context propagation** - No automatic W3C TraceContext header injection
 - **Full SDK compliance** - Not a complete OpenTelemetry SDK implementation
 

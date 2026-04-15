@@ -4,7 +4,7 @@
 
 import os
 from typing import Dict
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -16,17 +16,9 @@ from picotel import (
     send_spans,
 )
 
-
-class MockResponse:
-    """Mock response for urllib.request.urlopen."""
-
-    status = 200
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        pass
+_mock_response = Mock(status=200)
+_mock_response.__enter__ = Mock(return_value=_mock_response)
+_mock_response.__exit__ = Mock(return_value=False)
 
 
 def _prefixed(env: Dict[str, str], prefix: str) -> Dict[str, str]:
@@ -179,11 +171,28 @@ def test_get_resource_from_env(prefix):
 
 
 @PREFIXES
-def test_is_disabled(prefix):
-    """Test _is_disabled honours the SDK_DISABLED env var."""
-    env = _prefixed({"OTEL_SDK_DISABLED": "true"}, prefix)
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("true", True),
+        ("TRUE", True),
+        ("1", True),
+        ("false", False),
+        ("0", False),
+    ],
+)
+def test_is_disabled(prefix, value, expected):
+    """Test _is_disabled honours the SDK_DISABLED env var with various values."""
+    env = _prefixed({"OTEL_SDK_DISABLED": value}, prefix)
     with patch.dict(os.environ, env, clear=True):
-        assert picotel._is_disabled() is True
+        assert picotel._is_disabled() is expected
+
+
+@PREFIXES
+def test_is_disabled_unset(prefix):
+    """Test _is_disabled returns False when SDK_DISABLED is not set."""
+    with patch.dict(os.environ, _prefixed({}, prefix), clear=True):
+        assert picotel._is_disabled() is False
 
 
 # ---------------------------------------------------------------------------
@@ -340,13 +349,7 @@ def test_send_spans_with_env_endpoint(prefix, monkeypatch):
 
     from picotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
 
-    captured_request = None
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        nonlocal captured_request
-        captured_request = request
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     env = _prefixed({"OTEL_EXPORTER_OTLP_ENDPOINT": "http://env-test:4318"}, prefix)
@@ -363,8 +366,8 @@ def test_send_spans_with_env_endpoint(prefix, monkeypatch):
         result = send_spans(None, resource, [span])
 
         assert result is True
-        assert captured_request is not None
-        assert captured_request.get_full_url() == "http://env-test:4318/v1/traces"
+        request = mock_urlopen.call_args[0][0]
+        assert request.get_full_url() == "http://env-test:4318/v1/traces"
 
 
 @PREFIXES
@@ -377,13 +380,7 @@ def test_send_logs_with_env_endpoint(prefix, monkeypatch):
 
     from picotel import LogRecord  # noqa: PLC0415
 
-    captured_request = None
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        nonlocal captured_request
-        captured_request = request
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     env = _prefixed(
@@ -396,8 +393,8 @@ def test_send_logs_with_env_endpoint(prefix, monkeypatch):
         result = send_logs(None, resource, [log])
 
         assert result is True
-        assert captured_request is not None
-        assert captured_request.get_full_url() == "http://logs-env:4318/v1/logs"
+        request = mock_urlopen.call_args[0][0]
+        assert request.get_full_url() == "http://logs-env:4318/v1/logs"
 
 
 @PREFIXES
@@ -407,13 +404,7 @@ def test_send_spans_with_headers_from_env(prefix, monkeypatch):
 
     from picotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
 
-    captured_request = None
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        nonlocal captured_request
-        captured_request = request
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     env = _prefixed(
@@ -438,10 +429,10 @@ def test_send_spans_with_headers_from_env(prefix, monkeypatch):
         result = send_spans(None, resource, [span])
 
         assert result is True
-        assert captured_request is not None
-        assert captured_request.headers["Authorization"] == "Bearer token123"
-        assert captured_request.headers["X-custom"] == "value"
-        assert captured_request.headers["Content-type"] == "application/json"
+        request = mock_urlopen.call_args[0][0]
+        assert request.headers["Authorization"] == "Bearer token123"
+        assert request.headers["X-custom"] == "value"
+        assert request.headers["Content-type"] == "application/json"
 
 
 def test_send_without_endpoint_raises_config_error():
@@ -472,8 +463,10 @@ def test_send_without_endpoint_raises_config_error():
 
 
 @PREFIXES
-def test_send_returns_false_when_disabled(prefix):
-    """Test that send functions return False when picotel is disabled."""
+def test_send_returns_false_when_disabled(prefix, monkeypatch):
+    """Test that send functions return False and make no HTTP request when disabled."""
+    import urllib.request  # noqa: PLC0415
+
     from picotel import (  # noqa: PLC0415
         LogRecord,
         Span,
@@ -481,6 +474,9 @@ def test_send_returns_false_when_disabled(prefix):
         new_trace_id,
         now_ns,
     )
+
+    mock_urlopen = Mock(return_value=_mock_response)
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     env = _prefixed({"OTEL_SDK_DISABLED": "true"}, prefix)
     with patch.dict(os.environ, env, clear=True):
@@ -496,6 +492,24 @@ def test_send_returns_false_when_disabled(prefix):
 
         assert send_spans(None, resource, [span]) is False
         assert send_logs(None, resource, [log]) is False
+        mock_urlopen.assert_not_called()
+
+
+def test_disabled_no_traceparent_error():
+    """When disabled, TRACEPARENT sentinel must not log errors for missing env var."""
+    from picotel import (  # noqa: PLC0415
+        TRACEPARENT,
+        LogRecord,
+        Span,
+    )
+
+    with patch.dict(
+        os.environ, {"OTEL_SDK_DISABLED": "true"}, clear=True
+    ), patch.object(picotel._logger, "error") as mock_error:
+        Span(trace_id=TRACEPARENT, name="test", start_time_ns=1000, end_time_ns=2000)
+        LogRecord(body="test", trace_id=TRACEPARENT)
+
+        mock_error.assert_not_called()
 
 
 @PREFIXES
@@ -505,13 +519,7 @@ def test_span_context_manager_with_env(prefix, monkeypatch):
 
     from picotel import Span, new_span_id, new_trace_id  # noqa: PLC0415
 
-    captured_request = None
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        nonlocal captured_request
-        captured_request = request
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     env = _prefixed(
@@ -529,8 +537,8 @@ def test_span_context_manager_with_env(prefix, monkeypatch):
         ):
             pass
 
-        assert captured_request is not None
-        assert captured_request.get_full_url() == "http://env:4318/v1/traces"
+        request = mock_urlopen.call_args[0][0]
+        assert request.get_full_url() == "http://env:4318/v1/traces"
 
 
 @PREFIXES
@@ -544,13 +552,7 @@ def test_otlp_handler_with_env(prefix, monkeypatch):
 
     from picotel import OTLPHandler  # noqa: PLC0415
 
-    captured_request = None
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        nonlocal captured_request
-        captured_request = request
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     env = _prefixed(
@@ -568,8 +570,8 @@ def test_otlp_handler_with_env(prefix, monkeypatch):
 
         logger.info("Test message")
 
-        assert captured_request is not None
-        assert captured_request.get_full_url() == "http://logs:4318/v1/logs"
+        request = mock_urlopen.call_args[0][0]
+        assert request.get_full_url() == "http://logs:4318/v1/logs"
 
 
 def test_explicit_endpoint_still_works(monkeypatch):
@@ -584,12 +586,7 @@ def test_explicit_endpoint_still_works(monkeypatch):
         now_ns,
     )
 
-    captured_requests = []
-
-    def mock_urlopen(request, timeout=None):  # noqa: ARG001
-        captured_requests.append(request.get_full_url())
-        return MockResponse()
-
+    mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     with patch.dict(os.environ, {}, clear=True):
@@ -606,5 +603,26 @@ def test_explicit_endpoint_still_works(monkeypatch):
         assert send_spans("http://explicit:4318", resource, [span]) is True
         assert send_logs("http://explicit:4318", resource, [log]) is True
 
-        assert captured_requests[0] == "http://explicit:4318/v1/traces"
-        assert captured_requests[1] == "http://explicit:4318/v1/logs"
+        urls = [c[0][0].get_full_url() for c in mock_urlopen.call_args_list]
+        assert urls == [
+            "http://explicit:4318/v1/traces",
+            "http://explicit:4318/v1/logs",
+        ]
+
+
+# ---------------------------------------------------------------------------
+# _get_sender() factory
+# ---------------------------------------------------------------------------
+
+
+def test_get_sender_default_is_sync():
+    """_get_sender() returns _SyncSender by default (no PICOTEL_ASYNC)."""
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("PICOTEL_ASYNC", None)
+        assert isinstance(picotel._get_sender(), picotel._SyncSender)
+
+
+def test_get_sender_returns_async_when_enabled():
+    """_get_sender() returns _AsyncSender when PICOTEL_ASYNC is set."""
+    with patch.dict(os.environ, {"PICOTEL_ASYNC": "true"}):
+        assert isinstance(picotel._get_sender(), picotel._AsyncSender)

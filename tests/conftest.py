@@ -7,6 +7,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import picotel
+from picotel import _SyncSender
+
+
+@pytest.fixture
+def picotel_caplog(caplog):
+    """Attach caplog to the detached picotel._logger for the test duration."""
+    picotel._logger.addHandler(caplog.handler)
+    yield caplog
+    picotel._logger.removeHandler(caplog.handler)
 
 
 @pytest.fixture(autouse=True)
@@ -23,3 +32,4 @@ def _clear_picotel_caches():
     picotel._get_resource_from_env.cache_clear()
     picotel._parse_headers.cache_clear()
     picotel._parse_traceparent.cache_clear()
+    picotel._sender = _SyncSender()
