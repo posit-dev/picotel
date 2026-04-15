@@ -276,7 +276,7 @@ export PICOTEL_ASYNC=true   # or PICOTEL_ASYNC=1
 
 Telemetry is dispatched to a background daemon thread via an internal queue, so the calling thread is never blocked by slow or unreachable collectors. This is the recommended mode for long-running services where latency matters.
 
-**Error handling — queue back-pressure:** If the background thread cannot keep up (e.g. the collector is slow), the internal queue (256 entries) fills up and new signals are silently dropped. A single warning is logged per overflow episode. Once the queue drains, sending resumes normally.
+**Error handling — queue back-pressure:** If the background thread cannot keep up (e.g. the collector is slow), the internal queue (256 entries) fills up and new signals are silently dropped. A single error-level message is logged per overflow episode. Once the queue drains, sending resumes normally.
 
 **Fork safety:** The async sender detects `os.fork()` and automatically recreates its thread and queue in the child process. This works even when fork is called from C extensions that bypass `os.register_at_fork`.
 
