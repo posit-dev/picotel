@@ -201,6 +201,123 @@ def test_queue_full_warned_logs_once_then_resets(picotel_caplog):
 
 
 # ---------------------------------------------------------------------------
+# _AsyncSender circuit breaker
+# ---------------------------------------------------------------------------
+
+
+def _wait_for_worker(sender):
+    """Block until the worker has processed all previously-submitted work."""
+    done = threading.Event()
+    assert sender.submit(done.set) is True
+    assert done.wait(timeout=2), "worker did not reach sync point"
+
+
+def test_async_sender_trips_after_consecutive_failures(picotel_caplog):
+    """Circuit breaker trips after _MAX_CONSECUTIVE_ERRORS False returns."""
+    sender = _AsyncSender()
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS):
+        assert sender.submit(lambda: False) is True
+    # Give the worker a chance to process all queued failures.
+    for _ in range(50):
+        if sender._tripped:
+            break
+        threading.Event().wait(0.02)
+    assert sender._tripped is True
+    # submit() is now a no-op
+    called = []
+    assert sender.submit(lambda: called.append(1)) is False
+    # Worker never sees the post-trip submit (it never entered the queue).
+    assert called == []
+    assert any(
+        "further sends are disabled" in r.message for r in picotel_caplog.records
+    )
+
+
+def test_async_sender_config_error_trips_breaker(picotel_caplog):
+    """PicotelConfigError raised by the callable counts as a persistent failure."""
+    sender = _AsyncSender()
+
+    def raise_config():
+        raise picotel.PicotelConfigError("no endpoint")
+
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS):
+        assert sender.submit(raise_config) is True
+    for _ in range(50):
+        if sender._tripped:
+            break
+        threading.Event().wait(0.02)
+    assert sender._tripped is True
+    assert any(
+        "further sends are disabled" in r.message for r in picotel_caplog.records
+    )
+
+
+def test_async_sender_other_exception_does_not_trip():
+    """Non-persistent exceptions (e.g. ValueError) do not count toward the breaker."""
+    sender = _AsyncSender()
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS + 5):
+        sender.submit(lambda: (_ for _ in ()).throw(ValueError("boom")))
+    _wait_for_worker(sender)
+    assert sender._tripped is False
+    # A ValueError does not reset the counter either — the counter only
+    # moves on persistent-failure paths — but it must not advance it.
+    assert sender._consecutive_errors == 0
+
+
+def test_async_sender_success_resets_error_count():
+    """A successful send resets the consecutive-error counter."""
+    sender = _AsyncSender()
+    # Just below the threshold
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS - 1):
+        sender.submit(lambda: False)
+    # Inject a success. _wait_for_worker's sentinel submit itself returns
+    # None (truthy — not False), so this call also acts as the success.
+    _wait_for_worker(sender)
+    assert sender._consecutive_errors == 0
+    assert sender._tripped is False
+    # Another full run of failures must still not trip (N-1 failures).
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS - 1):
+        sender.submit(lambda: False)
+    _wait_for_worker(sender)
+    assert sender._tripped is False
+
+
+def test_async_sender_is_alive_not_affected_by_trip():
+    """is_alive() stays tied to the thread, not to _tripped.
+
+    This is deliberate: binding is_alive() to _tripped would cause the
+    double-checked is_alive() path in submit() to respawn the worker
+    and replace the queue on every post-trip call.
+    """
+    sender = _AsyncSender()
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS):
+        sender.submit(lambda: False)
+    for _ in range(50):
+        if sender._tripped:
+            break
+        threading.Event().wait(0.02)
+    assert sender._tripped is True
+    # Thread is still running, so is_alive() is still True.
+    assert sender.is_alive() is True
+
+
+def test_async_sender_tripped_does_not_enqueue():
+    """Post-trip, submit() must not put new items on the queue."""
+    sender = _AsyncSender()
+    for _ in range(sender._MAX_CONSECUTIVE_ERRORS):
+        sender.submit(lambda: False)
+    for _ in range(50):
+        if sender._tripped:
+            break
+        threading.Event().wait(0.02)
+    assert sender._tripped is True
+    qsize_before = sender._queue.qsize()
+    for _ in range(10):
+        assert sender.submit(lambda: None) is False
+    assert sender._queue.qsize() == qsize_before
+
+
+# ---------------------------------------------------------------------------
 # Integration: error resilience via async sender
 # ---------------------------------------------------------------------------
 
