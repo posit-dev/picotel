@@ -13,7 +13,7 @@ Requires Python 3.8+ for:
 - dataclasses for clean data structures
 - from __future__ import annotations for type hint syntax
 
-Version: 0.2.0
+Version: 0.2.1dev
 Author: Alessandro Molina <alessandro.molina@posit.co>
 URL: https://github.com/posit-dev/picotel
 License: MIT
@@ -867,7 +867,32 @@ class _AsyncSender:
     ``submit()`` itself is textbook double-checked locking with no
     fork-specific logic — all fork recovery is encapsulated in
     ``_ForkSafeLock``.
+
+    Circuit breaker
+    ---------------
+    Persistent failures (background send returned ``False``, or a
+    ``PicotelConfigError`` was raised) are counted.  After
+    ``_MAX_CONSECUTIVE_ERRORS`` consecutive persistent failures the sender
+    trips: ``submit()`` becomes a no-op that returns ``False``, and any
+    items already queued are drained-and-discarded by the worker so the
+    daemon thread can exit cleanly on process shutdown.  A successful send
+    resets the counter.
+
+    The trip is permanent for the lifetime of the process: in restricted
+    deployments (localhost, k8s) a persistently unreachable collector is
+    almost certainly a configuration error, and silently auto-resetting
+    would reintroduce the resource-consumption problem the breaker exists
+    to prevent.
+
+    ``_tripped`` has a single writer (the worker thread) and a single
+    reader (``submit()``), so no lock is needed — same pattern as
+    ``_queue_full_warned``.  ``is_alive()`` remains tied to the thread
+    lifecycle only; coupling it to ``_tripped`` would cause the
+    double-checked ``is_alive()`` path in ``submit()`` to respawn the
+    worker and replace the queue on every call post-trip.
     """
+
+    _MAX_CONSECUTIVE_ERRORS = 5
 
     def __init__(self, maxsize: int = 256) -> None:
         self._queue: queue.Queue = queue.Queue(maxsize=maxsize)
@@ -875,6 +900,8 @@ class _AsyncSender:
         self._pid: int = 0
         self._lock = _ForkSafeLock()
         self._queue_full_warned = False
+        self._consecutive_errors = 0
+        self._tripped = False
 
     def is_alive(self) -> bool:
         """Return True if the background worker is running in this process.
@@ -896,8 +923,10 @@ class _AsyncSender:
     def submit(self, fn: Any, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
         """Queue a callable for background execution.
 
-        Returns False if the queue is full.
+        Returns False if the circuit breaker has tripped or the queue is full.
         """
+        if self._tripped:
+            return False
         if not self.is_alive():
             with self._lock:
                 if not self.is_alive():
@@ -925,12 +954,31 @@ class _AsyncSender:
     def _worker(self) -> None:
         while True:
             fn, args, kwargs = self._queue.get()
+            if self._tripped:
+                # Drain-and-discard items queued before the trip so the
+                # daemon can exit cleanly on process shutdown.
+                continue
+            persistent_failure = False
             try:
-                fn(*args, **kwargs)
+                if fn(*args, **kwargs) is False:
+                    persistent_failure = True
+                else:
+                    self._consecutive_errors = 0
             except PicotelConfigError as e:
                 _logger.error(f"Telemetry config error: {e}")  # noqa: TRY400
+                persistent_failure = True
             except Exception as e:
+                # Transient caller errors (bad attributes, serialization bugs)
+                # are logged but not counted toward the circuit breaker.
                 _logger.error(f"Telemetry send error: {e}")  # noqa: TRY400
+            if persistent_failure:
+                self._consecutive_errors += 1
+                if self._consecutive_errors >= self._MAX_CONSECUTIVE_ERRORS:
+                    self._tripped = True
+                    _logger.error(
+                        f"Telemetry send failed {self._MAX_CONSECUTIVE_ERRORS}"
+                        " times consecutively, further sends are disabled"
+                    )
 
 
 class _SyncSender:
