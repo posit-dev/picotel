@@ -1175,7 +1175,10 @@ def _ssl_context(signal: str = "traces") -> ssl.SSLContext | None:
         `tests-e2e/conftest.py::collector`, next to the other env helpers.
     TODO(EVO-060): mTLS — if OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE (and
         optionally _CLIENT_KEY) is set, call ctx.load_cert_chain() on the
-        returned context before handing it back.
+        returned context before handing it back. Add unit-test coverage
+        alongside the other SSL tests in `tests/test_env_config.py`
+        (mock urlopen; assert load_cert_chain is called with the prefixed
+        env vars and that the context reaches the transport layer).
     """
     skip_verify = os.environ.get("PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY", "")
     if skip_verify.lower() in ("true", "1"):

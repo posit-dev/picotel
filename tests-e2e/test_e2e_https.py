@@ -34,11 +34,6 @@ from picotel import (
     send_spans,
 )
 
-# TODO(EVO-070): Add a sibling unit-test module `tests/test_https.py` that
-#     mirrors `tests/test_env_config.py`: mock urlopen and assert
-#     _ssl_context() is built from the env vars and handed to urlopen
-#     with the correct CA/skip-verify/mTLS configuration. E2E here only
-#     covers the happy path; unit tests pin down precedence and prefixes.
 # TODO(EVO-080): Document the new TLS env vars in README.md — add a
 #     "HTTPS / TLS" subsection under "Environment Variables" covering
 #     OTEL_EXPORTER_OTLP_CERTIFICATE (and signal-specific variants),
