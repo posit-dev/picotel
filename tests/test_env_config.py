@@ -872,7 +872,7 @@ def test_send_logs_uses_logs_specific_certificate(monkeypatch):
     ],
 )
 def test_ssl_context_skip_verify_truthy_values(value, expected_skip):
-    """PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY honours only the documented truthy set.
+    """PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY honours the documented truthy set.
 
     Truthy values ("true"/"TRUE"/"True"/"1") yield an unverified SSLContext
     with both certificate and hostname verification disabled, so operators
@@ -1215,9 +1215,20 @@ def test_send_spans_passes_client_cert_context_to_urlopen(monkeypatch, tmp_path)
     client_pem = tmp_path / "client.pem"
     subprocess.run(
         [  # noqa: S607
-            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-            "-keyout", str(client_pem), "-out", str(client_pem),
-            "-days", "1", "-subj", "/CN=picotel-test-client",
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(client_pem),
+            "-out",
+            str(client_pem),
+            "-days",
+            "1",
+            "-subj",
+            "/CN=picotel-test-client",
         ],
         check=True,
         capture_output=True,

@@ -38,9 +38,7 @@ def otelcol_output_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def collector(
-    request, otelcol_binary: Path, otelcol_output_file: Path, tmp_path: Path
-):
+def collector(request, otelcol_binary: Path, otelcol_output_file: Path, tmp_path: Path):
     """Start otelcol and yield endpoint metadata; stop it on teardown.
 
     Opt into TLS via indirect parametrization::
@@ -138,12 +136,24 @@ def _generate_self_signed_cert(target_dir: Path) -> tuple[Path, Path]:
 
     cert_path = target_dir / "otelcol-cert.pem"
     key_path = target_dir / "otelcol-key.pem"
-    subprocess.run(  # noqa: S603
-        [
-            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-            "-keyout", str(key_path), "-out", str(cert_path),
-            "-days", "1", "-subj", "/CN=localhost",
-            "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
+    subprocess.run(
+        [  # noqa: S607
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key_path),
+            "-out",
+            str(cert_path),
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=DNS:localhost,IP:127.0.0.1",
         ],
         check=True,
         capture_output=True,
