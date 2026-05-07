@@ -1145,6 +1145,7 @@ def _parse_headers() -> dict[str, str]:
     return headers
 
 
+@functools.lru_cache(maxsize=None)
 def _ssl_context(signal: str = "traces") -> ssl.SSLContext | None:
     """Return an SSLContext for HTTPS OTLP submission, or None.
 
@@ -1168,11 +1169,6 @@ def _ssl_context(signal: str = "traces") -> ssl.SSLContext | None:
 
     :param signal: The signal type - "traces" or "logs"
 
-    TODO(EVO-010): Add @functools.lru_cache(maxsize=None) once the rest of
-        the env parsing is stable. Skipped in the probe so tests can
-        mutate env vars with patch.dict() without a cache_clear dance.
-        Same commit must add `_ssl_context` to the cache_clear loop in
-        `tests-e2e/conftest.py::collector`, next to the other env helpers.
     TODO(EVO-060): mTLS — if OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE (and
         optionally _CLIENT_KEY) is set, call ctx.load_cert_chain() on the
         returned context before handing it back. Add unit-test coverage

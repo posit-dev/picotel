@@ -32,4 +32,5 @@ def _clear_picotel_caches():
     picotel._get_resource_from_env.cache_clear()
     picotel._parse_headers.cache_clear()
     picotel._parse_traceparent.cache_clear()
+    picotel._ssl_context.cache_clear()
     picotel._sender = _SyncSender()

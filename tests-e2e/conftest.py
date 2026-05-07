@@ -61,7 +61,7 @@ def collector(
         picotel._get_endpoint,
         picotel._parse_headers,
         picotel._get_resource_from_env,
-        # _ssl_context joins this list when EVO-010 lands (see picotel.py).
+        picotel._ssl_context,
     ]:
         if hasattr(func, "cache_clear"):
             func.cache_clear()

@@ -947,6 +947,8 @@ def test_ssl_context_skip_verify_not_remapped_by_prefix():
     assert ctx is not None
     assert ctx.verify_mode == ssl.CERT_NONE
 
+    picotel._ssl_context.cache_clear()
+
     # A FOO_-prefixed variant must NOT trigger skip-verify.
     with patch.dict(
         os.environ,
