@@ -574,9 +574,9 @@ def send_spans(
         )
         # context is None for http:// (ignored) and set for https:// when a
         # CA cert has been configured via env — see _ssl_context() for the
-        # graduation plan (skip-verify, signal overrides, mTLS).
+        # graduation plan (skip-verify, mTLS).
         with urllib.request.urlopen(  # noqa: S310
-            request, timeout=timeout, context=_ssl_context()
+            request, timeout=timeout, context=_ssl_context("traces")
         ) as response:
             # OTLP spec defines only 200 as successful export
             return response.status == 200  # noqa: PLR2004
@@ -677,11 +677,10 @@ def send_logs(
         request = urllib.request.Request(  # noqa: S310
             url, data=data, headers=headers, method="POST"
         )
-        # See send_spans for the _ssl_context() rationale — shared helper
-        # intentionally, because the probe does not yet differentiate
-        # signals. Signal-specific CA overrides land with EVO-020.
+        # See send_spans for the _ssl_context() rationale — "logs" selects
+        # the per-signal OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE override when set.
         with urllib.request.urlopen(  # noqa: S310
-            request, timeout=timeout, context=_ssl_context()
+            request, timeout=timeout, context=_ssl_context("logs")
         ) as response:
             # OTLP spec defines only 200 as successful export
             return response.status == 200  # noqa: PLR2004
@@ -1146,32 +1145,34 @@ def _parse_headers() -> dict[str, str]:
     return headers
 
 
-def _ssl_context() -> ssl.SSLContext | None:
+def _ssl_context(signal: str = "traces") -> ssl.SSLContext | None:
     """Return an SSLContext for HTTPS OTLP submission, or None.
 
-    Probe scope: only the standard OTEL env var `OTEL_EXPORTER_OTLP_CERTIFICATE`
-    is honoured (routed through _env() so PICOTEL_PREFIX remaps it like the
-    other OTEL_EXPORTER_OTLP_* vars). When set, returns a context that trusts
-    only that PEM (so self-signed CAs work without touching the system trust
-    store). When unset, returns None — urllib then uses its default
-    system-trust context for HTTPS URLs, and ignores the argument entirely
-    for http://.
+    Signal-specific CA precedence mirrors _get_endpoint(): the
+    per-signal env var `OTEL_EXPORTER_OTLP_{SIGNAL}_CERTIFICATE` wins
+    over the general `OTEL_EXPORTER_OTLP_CERTIFICATE`. Both names are
+    routed through _env() so PICOTEL_PREFIX remaps them like the other
+    OTEL_EXPORTER_OTLP_* vars. When set, returns a context that trusts
+    only that PEM (so self-signed CAs work without touching the system
+    trust store). When unset, returns None — urllib then uses its
+    default system-trust context for HTTPS URLs, and ignores the
+    argument entirely for http://.
 
     Picotel-specific escape hatch: when
     ``PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY`` is truthy, return an
     unverified context that disables both certificate and hostname checks.
     This var is already in picotel's namespace so PICOTEL_PREFIX does NOT
-    remap it; it is read raw from the environment. Skip-verify wins over
-    any CA configuration.
+    remap it; it is read raw from the environment. Skip-verify is
+    signal-agnostic by design (it's a picotel escape hatch, not an OTEL
+    spec var) and wins over any CA configuration.
+
+    :param signal: The signal type - "traces" or "logs"
 
     TODO(EVO-010): Add @functools.lru_cache(maxsize=None) once the rest of
         the env parsing is stable. Skipped in the probe so tests can
         mutate env vars with patch.dict() without a cache_clear dance.
         Same commit must add `_ssl_context` to the cache_clear loop in
         `tests-e2e/conftest.py::collector`, next to the other env helpers.
-    TODO(EVO-020): Signal-specific override — accept a `signal` argument
-        and consult OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE /
-        OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE before falling back here.
     TODO(EVO-060): mTLS — if OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE (and
         optionally _CLIENT_KEY) is set, call ctx.load_cert_chain() on the
         returned context before handing it back.
@@ -1181,7 +1182,10 @@ def _ssl_context() -> ssl.SSLContext | None:
         # S323 is precisely the behaviour this picotel-specific escape hatch
         # opts into — see the docstring above.
         return ssl._create_unverified_context()  # noqa: S323
-    cafile = os.environ.get(_env("OTEL_EXPORTER_OTLP_CERTIFICATE"))
+    signal_var = _env(f"OTEL_EXPORTER_OTLP_{signal.upper()}_CERTIFICATE")
+    cafile = os.environ.get(signal_var) or os.environ.get(
+        _env("OTEL_EXPORTER_OTLP_CERTIFICATE")
+    )
     if not cafile:
         return None
     return ssl.create_default_context(cafile=cafile)

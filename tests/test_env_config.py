@@ -710,6 +710,147 @@ def test_send_spans_passes_ssl_context_from_env_certificate(prefix, monkeypatch)
     mock_create.assert_called_once_with(cafile="/some/path")
 
 
+@PREFIXES
+@pytest.mark.parametrize(
+    ("signal", "signal_var"),
+    [
+        ("traces", "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE"),
+        ("logs", "OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE"),
+    ],
+)
+def test_ssl_context_signal_specific_certificate_wins(
+    prefix, signal, signal_var, monkeypatch
+):
+    """Per-signal CA var overrides the general OTEL_EXPORTER_OTLP_CERTIFICATE.
+
+    Mirrors the _get_endpoint precedence: OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE
+    / OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE win over OTEL_EXPORTER_OTLP_CERTIFICATE,
+    and both names are remapped by PICOTEL_PREFIX via _env().
+    """
+    import ssl  # noqa: PLC0415
+
+    sentinel = object()
+    mock_create = Mock(return_value=sentinel)
+    monkeypatch.setattr(ssl, "create_default_context", mock_create)
+
+    env = _prefixed(
+        {
+            signal_var: "/path/signal.pem",
+            "OTEL_EXPORTER_OTLP_CERTIFICATE": "/path/general.pem",
+        },
+        prefix,
+    )
+    with patch.dict(os.environ, env, clear=True):
+        result = picotel._ssl_context(signal)
+
+    assert result is sentinel
+    mock_create.assert_called_once_with(cafile="/path/signal.pem")
+
+
+def test_ssl_context_signal_specific_does_not_apply_to_other_signal():
+    """A per-signal CA must not leak into the other signal's context.
+
+    With no general OTEL_EXPORTER_OTLP_CERTIFICATE configured, setting only
+    the traces-specific cert must leave _ssl_context("logs") at None, and
+    vice versa. Prefix behavior is covered by
+    test_ssl_context_signal_specific_certificate_wins; this test focuses on
+    cross-signal isolation.
+    """
+    with patch.dict(
+        os.environ,
+        {"OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE": "/traces.pem"},
+        clear=True,
+    ):
+        assert picotel._ssl_context("logs") is None
+    with patch.dict(
+        os.environ,
+        {"OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE": "/logs.pem"},
+        clear=True,
+    ):
+        assert picotel._ssl_context("traces") is None
+
+
+def test_send_spans_uses_traces_specific_certificate(monkeypatch):
+    """send_spans threads "traces" down to _ssl_context → create_default_context.
+
+    With both the traces-specific and general CA set, the cafile handed to
+    ssl.create_default_context must be the traces-specific one. This catches
+    a regression where send_spans passed the wrong signal (e.g. "logs") to
+    _ssl_context — the general cert would be picked up instead of the
+    per-signal one, breaking the send_spans → _ssl_context("traces") contract.
+    """
+    import ssl  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    from picotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
+
+    sentinel = object()
+    mock_create = Mock(return_value=sentinel)
+    monkeypatch.setattr(ssl, "create_default_context", mock_create)
+    mock_urlopen = Mock(return_value=_mock_response)
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    with patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "https://secure:4318",
+            "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE": "/traces.pem",
+            "OTEL_EXPORTER_OTLP_CERTIFICATE": "/general.pem",
+        },
+        clear=True,
+    ):
+        resource = Resource({"service.name": "test"})
+        span = Span(
+            trace_id=new_trace_id(),
+            span_id=new_span_id(),
+            name="test-span",
+            start_time_ns=now_ns(),
+            end_time_ns=now_ns(),
+        )
+
+        assert send_spans(None, resource, [span]) is True
+
+    assert mock_urlopen.call_args.kwargs["context"] is sentinel
+    mock_create.assert_called_once_with(cafile="/traces.pem")
+
+
+def test_send_logs_uses_logs_specific_certificate(monkeypatch):
+    """send_logs threads "logs" down to _ssl_context → create_default_context.
+
+    Symmetric to test_send_spans_uses_traces_specific_certificate: with both
+    the logs-specific and general CA set, the cafile handed to
+    ssl.create_default_context must be the logs-specific one. Catches a
+    regression where send_logs passed the wrong signal (e.g. "traces").
+    """
+    import ssl  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    from picotel import LogRecord  # noqa: PLC0415
+
+    sentinel = object()
+    mock_create = Mock(return_value=sentinel)
+    monkeypatch.setattr(ssl, "create_default_context", mock_create)
+    mock_urlopen = Mock(return_value=_mock_response)
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    with patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "https://secure:4318",
+            "OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE": "/logs.pem",
+            "OTEL_EXPORTER_OTLP_CERTIFICATE": "/general.pem",
+        },
+        clear=True,
+    ):
+        resource = Resource({"service.name": "test"})
+        log = LogRecord(body="test log")
+
+        assert send_logs(None, resource, [log]) is True
+
+    assert mock_urlopen.call_args.kwargs["context"] is sentinel
+    mock_create.assert_called_once_with(cafile="/logs.pem")
+
+
 # ---------------------------------------------------------------------------
 # TLS insecure skip-verify (PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY)
 # ---------------------------------------------------------------------------
