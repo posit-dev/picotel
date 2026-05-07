@@ -2,36 +2,14 @@
 
 """E2E test for HTTPS signal submission against a TLS-enabled collector.
 
-This is the probe slice for GitHub issue #11 ("Add support for HTTPS
-signals"). It drives picotel's `send_spans` against a real otelcol
-instance with a TLS-enabled OTLP receiver fronted by a self-signed cert,
-and proves that the client trusts the server when
-`OTEL_EXPORTER_OTLP_CERTIFICATE` points at the CA PEM.
+Probe slice for GitHub issue #11 ("Add support for HTTPS signals"):
+drives picotel's ``send_spans`` against a real otelcol instance with a
+TLS-enabled OTLP receiver fronted by a self-signed cert, and proves that
+the client trusts the server when ``OTEL_EXPORTER_OTLP_CERTIFICATE``
+points at the CA PEM.
 
-Intent ledger for this feature (see also TODO(EVO-...) markers in
-`src/picotel.py` and `tests-e2e/conftest.py`):
-
-* EVO-010  cache `_ssl_context` with @lru_cache (env-driven like the other
-           env helpers) and wire `cache_clear()` into conftest.
-* EVO-020  honour signal-specific overrides
-           (`OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE`, `..._LOGS_CERTIFICATE`).
-* EVO-030  honour `PICOTEL_PREFIX` for all new TLS env vars via `_env()`.
-* EVO-040  `PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY` escape hatch, plus
-           an e2e negative control proving the handshake fails without
-           either a CA or skip-verify.
-* EVO-050  openssl-free cert generation fallback (probe-level TODO in
-           conftest).
-* EVO-060  mTLS: `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` and
-           `..._CLIENT_KEY` plus signal-specific variants, and an otelcol
-           config that requires client auth.
-* EVO-070  unit coverage in `tests/test_https.py` mirroring
-           `tests/test_env_config.py` patterns (mock urlopen, assert the
-           SSL context is built and passed correctly).
-* EVO-080  README "HTTPS / TLS" subsection under "Environment Variables"
-           documenting the new vars, precedence, and the picotel-specific
-           skip-verify flag.
-* EVO-090  e2e coverage for `send_logs` over TLS (trivially mirrors the
-           trace test once the signal-specific vars land in EVO-020).
+The full graduation plan lives as evolution markers placed at the code
+boundaries where each change belongs; run ``probedev list`` to enumerate.
 """
 
 from __future__ import annotations
@@ -55,6 +33,20 @@ from picotel import (
     now_ns,
     send_spans,
 )
+
+# TODO(EVO-070): Add a sibling unit-test module `tests/test_https.py` that
+#     mirrors `tests/test_env_config.py`: mock urlopen and assert
+#     _ssl_context() is built from the env vars and handed to urlopen
+#     with the correct CA/skip-verify/mTLS configuration. E2E here only
+#     covers the happy path; unit tests pin down precedence and prefixes.
+# TODO(EVO-080): Document the new TLS env vars in README.md — add a
+#     "HTTPS / TLS" subsection under "Environment Variables" covering
+#     OTEL_EXPORTER_OTLP_CERTIFICATE (and signal-specific variants),
+#     PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY, mTLS vars, precedence
+#     rules, and PICOTEL_PREFIX interaction.
+# TODO(EVO-090): Add an e2e test that sends a LogRecord over the same
+#     TLS collector fixture. Trivially mirrors the span test below once
+#     EVO-020 lands signal-specific CA vars.
 
 
 @pytest.mark.parametrize("collector", [{"tls": True}], indirect=True)

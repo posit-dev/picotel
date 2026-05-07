@@ -679,7 +679,7 @@ def send_logs(
         )
         # See send_spans for the _ssl_context() rationale — shared helper
         # intentionally, because the probe does not yet differentiate
-        # signals (TODO(EVO-020)).
+        # signals. Signal-specific CA overrides land with EVO-020.
         with urllib.request.urlopen(  # noqa: S310
             request, timeout=timeout, context=_ssl_context()
         ) as response:
@@ -1158,6 +1158,8 @@ def _ssl_context() -> ssl.SSLContext | None:
     TODO(EVO-010): Add @functools.lru_cache(maxsize=None) once the rest of
         the env parsing is stable. Skipped in the probe so tests can
         mutate env vars with patch.dict() without a cache_clear dance.
+        Same commit must add `_ssl_context` to the cache_clear loop in
+        `tests-e2e/conftest.py::collector`, next to the other env helpers.
     TODO(EVO-020): Signal-specific override — accept a `signal` argument
         and consult OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE /
         OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE before falling back here.
