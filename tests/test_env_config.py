@@ -611,6 +611,106 @@ def test_explicit_endpoint_still_works(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# TLS CA certificate (OTEL_EXPORTER_OTLP_CERTIFICATE)
+# ---------------------------------------------------------------------------
+
+
+@PREFIXES
+def test_ssl_context_reads_certificate_via_env(prefix, monkeypatch):
+    """_ssl_context() routes OTEL_EXPORTER_OTLP_CERTIFICATE through _env().
+
+    Proves that setting PICOTEL_EXPORTER_OTLP_CERTIFICATE works under
+    PICOTEL_PREFIX=PICOTEL, matching how all other OTEL_EXPORTER_OTLP_*
+    vars are remapped. Without a prefix, the standard OTEL_ name is still
+    honoured.
+    """
+    import ssl  # noqa: PLC0415
+
+    sentinel = object()
+    mock_create = Mock(return_value=sentinel)
+    monkeypatch.setattr(ssl, "create_default_context", mock_create)
+
+    env = _prefixed({"OTEL_EXPORTER_OTLP_CERTIFICATE": "/path/to/ca.pem"}, prefix)
+    with patch.dict(os.environ, env, clear=True):
+        result = picotel._ssl_context()
+
+    assert result is sentinel
+    mock_create.assert_called_once_with(cafile="/path/to/ca.pem")
+
+
+@PREFIXES
+def test_ssl_context_returns_none_when_certificate_unset(prefix, monkeypatch):
+    """_ssl_context() returns None when the (prefixed) cert var is unset.
+
+    Under PICOTEL_PREFIX=PICOTEL an unprefixed OTEL_EXPORTER_OTLP_CERTIFICATE
+    must be ignored — only the prefixed name counts.
+    """
+    import ssl  # noqa: PLC0415
+
+    mock_create = Mock()
+    monkeypatch.setattr(ssl, "create_default_context", mock_create)
+
+    # Put the *wrong* name in the environment: standard when prefixed,
+    # prefixed when unprefixed. Either way, _ssl_context() should ignore it.
+    stray = (
+        {"OTEL_EXPORTER_OTLP_CERTIFICATE": "/should/be/ignored.pem"}
+        if prefix
+        else {"PICOTEL_EXPORTER_OTLP_CERTIFICATE": "/should/be/ignored.pem"}
+    )
+    env = {**_prefixed({}, prefix), **stray}
+    with patch.dict(os.environ, env, clear=True):
+        assert picotel._ssl_context() is None
+    mock_create.assert_not_called()
+
+
+@PREFIXES
+def test_send_spans_passes_ssl_context_from_env_certificate(prefix, monkeypatch):
+    """send_spans hands the SSL context built from the (prefixed) cert var to urlopen.
+
+    This closes the integration-level gap for OTEL_EXPORTER_OTLP_CERTIFICATE:
+    every other prefix-sensitive env var is exercised through send_spans with
+    a mocked urlopen, proving end-to-end that the prefixed name is honoured
+    and reaches the transport layer. Without the _env() wrap on the cert
+    lookup, the PICOTEL-prefixed case would fail to find the cert, and the
+    context kwarg seen by urlopen would be None instead of our sentinel.
+    """
+    import ssl  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    from picotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
+
+    sentinel = object()
+    mock_create = Mock(return_value=sentinel)
+    monkeypatch.setattr(ssl, "create_default_context", mock_create)
+
+    mock_urlopen = Mock(return_value=_mock_response)
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    env = _prefixed(
+        {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "https://secure:4318",
+            "OTEL_EXPORTER_OTLP_CERTIFICATE": "/some/path",
+        },
+        prefix,
+    )
+    with patch.dict(os.environ, env, clear=True):
+        resource = Resource({"service.name": "test"})
+        span = Span(
+            trace_id=new_trace_id(),
+            span_id=new_span_id(),
+            name="test-span",
+            start_time_ns=now_ns(),
+            end_time_ns=now_ns(),
+        )
+
+        result = send_spans(None, resource, [span])
+
+    assert result is True
+    assert mock_urlopen.call_args.kwargs["context"] is sentinel
+    mock_create.assert_called_once_with(cafile="/some/path")
+
+
+# ---------------------------------------------------------------------------
 # _get_sender() factory
 # ---------------------------------------------------------------------------
 

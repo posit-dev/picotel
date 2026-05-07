@@ -1150,10 +1150,12 @@ def _ssl_context() -> ssl.SSLContext | None:
     """Return an SSLContext for HTTPS OTLP submission, or None.
 
     Probe scope: only the standard OTEL env var `OTEL_EXPORTER_OTLP_CERTIFICATE`
-    is honoured. When set, returns a context that trusts only that PEM
-    (so self-signed CAs work without touching the system trust store).
-    When unset, returns None — urllib then uses its default system-trust
-    context for HTTPS URLs, and ignores the argument entirely for http://.
+    is honoured (routed through _env() so PICOTEL_PREFIX remaps it like the
+    other OTEL_EXPORTER_OTLP_* vars). When set, returns a context that trusts
+    only that PEM (so self-signed CAs work without touching the system trust
+    store). When unset, returns None — urllib then uses its default
+    system-trust context for HTTPS URLs, and ignores the argument entirely
+    for http://.
 
     TODO(EVO-010): Add @functools.lru_cache(maxsize=None) once the rest of
         the env parsing is stable. Skipped in the probe so tests can
@@ -1163,8 +1165,6 @@ def _ssl_context() -> ssl.SSLContext | None:
     TODO(EVO-020): Signal-specific override — accept a `signal` argument
         and consult OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE /
         OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE before falling back here.
-    TODO(EVO-030): Route all env reads through _env() so PICOTEL_PREFIX
-        remaps these vars the same way it remaps OTEL_EXPORTER_OTLP_*.
     TODO(EVO-040): Honour PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY —
         if truthy, short-circuit with a CERT_NONE / check_hostname=False
         context that overrides any CA configuration.
@@ -1172,7 +1172,7 @@ def _ssl_context() -> ssl.SSLContext | None:
         optionally _CLIENT_KEY) is set, call ctx.load_cert_chain() on the
         returned context before handing it back.
     """
-    cafile = os.environ.get("OTEL_EXPORTER_OTLP_CERTIFICATE")
+    cafile = os.environ.get(_env("OTEL_EXPORTER_OTLP_CERTIFICATE"))
     if not cafile:
         return None
     return ssl.create_default_context(cafile=cafile)
