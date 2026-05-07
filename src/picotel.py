@@ -1159,35 +1159,53 @@ def _ssl_context(signal: str = "traces") -> ssl.SSLContext | None:
     default system-trust context for HTTPS URLs, and ignores the
     argument entirely for http://.
 
+    Client certificate (mTLS) support: when
+    ``OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE`` is set, its chain is
+    loaded onto the returned context via ``load_cert_chain``.
+    ``OTEL_EXPORTER_OTLP_CLIENT_KEY`` is optional (a single PEM may
+    embed both cert and key). Both names are routed through _env() so
+    PICOTEL_PREFIX remaps them. mTLS is signal-agnostic by design. A
+    client cert without any CA configuration still yields a context
+    (built from the system trust store) so the cert can be presented;
+    otherwise the mTLS configuration would be silently ignored. A key
+    without a cert is meaningless and returns None.
+
     Picotel-specific escape hatch: when
     ``PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY`` is truthy, return an
     unverified context that disables both certificate and hostname checks.
     This var is already in picotel's namespace so PICOTEL_PREFIX does NOT
     remap it; it is read raw from the environment. Skip-verify is
     signal-agnostic by design (it's a picotel escape hatch, not an OTEL
-    spec var) and wins over any CA configuration.
+    spec var) and wins over any CA configuration — any configured
+    client cert chain is still loaded onto the unverified context so
+    mTLS against a self-signed server (dev setups) keeps working.
 
     :param signal: The signal type - "traces" or "logs"
-
-    TODO(EVO-060): mTLS — if OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE (and
-        optionally _CLIENT_KEY) is set, call ctx.load_cert_chain() on the
-        returned context before handing it back. Add unit-test coverage
-        alongside the other SSL tests in `tests/test_env_config.py`
-        (mock urlopen; assert load_cert_chain is called with the prefixed
-        env vars and that the context reaches the transport layer).
     """
+    client_cert = os.environ.get(_env("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE"))
+    client_key = os.environ.get(_env("OTEL_EXPORTER_OTLP_CLIENT_KEY"))
+
+    def _with_client_cert(ctx: ssl.SSLContext) -> ssl.SSLContext:
+        if client_cert:
+            ctx.load_cert_chain(certfile=client_cert, keyfile=client_key or None)
+        return ctx
+
     skip_verify = os.environ.get("PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY", "")
     if skip_verify.lower() in ("true", "1"):
         # S323 is precisely the behaviour this picotel-specific escape hatch
         # opts into — see the docstring above.
-        return ssl._create_unverified_context()  # noqa: S323
+        return _with_client_cert(ssl._create_unverified_context())  # noqa: S323
     signal_var = _env(f"OTEL_EXPORTER_OTLP_{signal.upper()}_CERTIFICATE")
     cafile = os.environ.get(signal_var) or os.environ.get(
         _env("OTEL_EXPORTER_OTLP_CERTIFICATE")
     )
-    if not cafile:
-        return None
-    return ssl.create_default_context(cafile=cafile)
+    if cafile:
+        return _with_client_cert(ssl.create_default_context(cafile=cafile))
+    if client_cert:
+        # Client cert alone still needs a context so the cert can be presented;
+        # fall back to the system trust store for server verification.
+        return _with_client_cert(ssl.create_default_context())
+    return None
 
 
 @functools.lru_cache(maxsize=None)

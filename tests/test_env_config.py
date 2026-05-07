@@ -1010,6 +1010,246 @@ def test_send_spans_passes_skip_verify_context_to_urlopen(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# TLS mTLS client certificate — OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE and
+# OTEL_EXPORTER_OTLP_CLIENT_KEY
+# ---------------------------------------------------------------------------
+
+
+@PREFIXES
+def test_ssl_context_client_cert_only_loads_chain(prefix, monkeypatch):
+    """_ssl_context() loads the client cert chain when only the cert var is set.
+
+    ``OTEL_EXPORTER_OTLP_CLIENT_KEY`` is optional — a single PEM can embed
+    both cert and key, and ``load_cert_chain(keyfile=None)`` is valid. The
+    var name is routed through _env() so PICOTEL_PREFIX remaps it; we
+    parametrize over PREFIXES to prove the routing.
+    """
+    import ssl  # noqa: PLC0415
+
+    sentinel_ctx = Mock()
+    mock_create = Mock(return_value=sentinel_ctx)
+    monkeypatch.setattr(ssl, "create_default_context", mock_create)
+
+    env = _prefixed(
+        {"OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE": "/path/to/client.pem"},
+        prefix,
+    )
+    with patch.dict(os.environ, env, clear=True):
+        result = picotel._ssl_context()
+
+    assert result is sentinel_ctx
+    # Client cert alone falls back to the system trust store (no cafile).
+    mock_create.assert_called_once_with()
+    sentinel_ctx.load_cert_chain.assert_called_once_with(
+        certfile="/path/to/client.pem", keyfile=None
+    )
+
+
+@PREFIXES
+def test_ssl_context_client_cert_and_key_loads_both(prefix, monkeypatch):
+    """_ssl_context() loads both cert and key when both vars are set.
+
+    Both ``OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE`` and
+    ``OTEL_EXPORTER_OTLP_CLIENT_KEY`` route through _env(), so this test
+    parametrizes over PREFIXES.
+    """
+    import ssl  # noqa: PLC0415
+
+    sentinel_ctx = Mock()
+    mock_create = Mock(return_value=sentinel_ctx)
+    monkeypatch.setattr(ssl, "create_default_context", mock_create)
+
+    env = _prefixed(
+        {
+            "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE": "/path/to/client.pem",
+            "OTEL_EXPORTER_OTLP_CLIENT_KEY": "/path/to/client.key",
+        },
+        prefix,
+    )
+    with patch.dict(os.environ, env, clear=True):
+        result = picotel._ssl_context()
+
+    assert result is sentinel_ctx
+    sentinel_ctx.load_cert_chain.assert_called_once_with(
+        certfile="/path/to/client.pem", keyfile="/path/to/client.key"
+    )
+
+
+def test_ssl_context_client_cert_applies_to_both_signals(monkeypatch):
+    """Client cert chain loads identically for "traces" and "logs" signals.
+
+    mTLS is signal-agnostic by design — the same client cert is presented
+    regardless of which OTLP signal is being sent. This test proves that
+    contract by invoking _ssl_context() for each signal and checking
+    load_cert_chain is called with identical arguments both times.
+    """
+    import ssl  # noqa: PLC0415
+
+    sentinel_ctx = Mock()
+    mock_create = Mock(return_value=sentinel_ctx)
+    monkeypatch.setattr(ssl, "create_default_context", mock_create)
+
+    with patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE": "/path/to/client.pem",
+            "OTEL_EXPORTER_OTLP_CLIENT_KEY": "/path/to/client.key",
+        },
+        clear=True,
+    ):
+        picotel._ssl_context.cache_clear()
+        picotel._ssl_context("traces")
+        picotel._ssl_context.cache_clear()
+        picotel._ssl_context("logs")
+
+    expected_kwargs = {
+        "certfile": "/path/to/client.pem",
+        "keyfile": "/path/to/client.key",
+    }
+    calls = sentinel_ctx.load_cert_chain.call_args_list
+    assert len(calls) == 2
+    assert calls[0].kwargs == expected_kwargs
+    assert calls[1].kwargs == expected_kwargs
+
+
+def test_ssl_context_client_key_without_cert_returns_none():
+    """A client key without a client cert is meaningless and yields None.
+
+    Semantic check — no prefix routing involved. Without a cert the key
+    alone cannot be presented, so _ssl_context() must fall through to
+    the normal "nothing configured" path.
+    """
+    with patch.dict(
+        os.environ,
+        {"OTEL_EXPORTER_OTLP_CLIENT_KEY": "/path/to/client.key"},
+        clear=True,
+    ):
+        assert picotel._ssl_context() is None
+
+
+def test_ssl_context_skip_verify_keeps_client_cert(monkeypatch):
+    """Skip-verify does not drop the client cert chain.
+
+    mTLS against a skip-verify endpoint is a legitimate dev setup
+    (self-signed server cert, real client cert). The unverified context
+    must still have ``load_cert_chain`` called on it.
+    """
+    import ssl  # noqa: PLC0415
+
+    sentinel_ctx = Mock()
+    mock_create_unverified = Mock(return_value=sentinel_ctx)
+    monkeypatch.setattr(ssl, "_create_unverified_context", mock_create_unverified)
+
+    with patch.dict(
+        os.environ,
+        {
+            "PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY": "true",
+            "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE": "/path/to/client.pem",
+            "OTEL_EXPORTER_OTLP_CLIENT_KEY": "/path/to/client.key",
+        },
+        clear=True,
+    ):
+        result = picotel._ssl_context()
+
+    assert result is sentinel_ctx
+    sentinel_ctx.load_cert_chain.assert_called_once_with(
+        certfile="/path/to/client.pem", keyfile="/path/to/client.key"
+    )
+
+
+def test_ssl_context_client_cert_loaded_onto_server_ca_context(monkeypatch):
+    """Client cert chain is loaded onto the server-CA-aware context.
+
+    When both a server CA and a client cert are configured, the CA-verified
+    context built via ``create_default_context(cafile=...)`` is the one that
+    receives ``load_cert_chain`` — proving mTLS and server verification
+    compose rather than one replacing the other.
+    """
+    import ssl  # noqa: PLC0415
+
+    sentinel_ctx = Mock()
+    mock_create = Mock(return_value=sentinel_ctx)
+    monkeypatch.setattr(ssl, "create_default_context", mock_create)
+
+    with patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_CERTIFICATE": "/path/to/ca.pem",
+            "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE": "/path/to/client.pem",
+            "OTEL_EXPORTER_OTLP_CLIENT_KEY": "/path/to/client.key",
+        },
+        clear=True,
+    ):
+        result = picotel._ssl_context()
+
+    assert result is sentinel_ctx
+    mock_create.assert_called_once_with(cafile="/path/to/ca.pem")
+    sentinel_ctx.load_cert_chain.assert_called_once_with(
+        certfile="/path/to/client.pem", keyfile="/path/to/client.key"
+    )
+
+
+def test_send_spans_passes_client_cert_context_to_urlopen(monkeypatch, tmp_path):
+    """send_spans hands a real mTLS-enabled SSLContext through to urlopen.
+
+    Closes the integration-level gap for mTLS by proving the end-to-end
+    wiring against the real stdlib ssl module: a real self-signed PEM is
+    generated via openssl, ``_ssl_context()`` builds a real SSLContext,
+    ``load_cert_chain`` runs for real against the PEM, and the resulting
+    context is the one urlopen receives. If any kwarg to
+    ``load_cert_chain`` drifted (e.g. malformed path or wrong keyword),
+    the call would raise here rather than silently pass against a Mock.
+    """
+    import shutil  # noqa: PLC0415
+    import ssl  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    from picotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl not available")
+
+    # Combined cert+key PEM — load_cert_chain accepts keyfile=None in that case,
+    # which also exercises the "client cert only" path of _with_client_cert.
+    client_pem = tmp_path / "client.pem"
+    subprocess.run(
+        [  # noqa: S607
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-keyout", str(client_pem), "-out", str(client_pem),
+            "-days", "1", "-subj", "/CN=picotel-test-client",
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    mock_urlopen = Mock(return_value=_mock_response)
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    with patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "https://secure:4318",
+            "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE": str(client_pem),
+        },
+        clear=True,
+    ):
+        resource = Resource({"service.name": "test"})
+        span = Span(
+            trace_id=new_trace_id(),
+            span_id=new_span_id(),
+            name="test-span",
+            start_time_ns=now_ns(),
+            end_time_ns=now_ns(),
+        )
+
+        assert send_spans(None, resource, [span]) is True
+
+    ctx = mock_urlopen.call_args.kwargs["context"]
+    assert isinstance(ctx, ssl.SSLContext)
+
+
+# ---------------------------------------------------------------------------
 # _get_sender() factory
 # ---------------------------------------------------------------------------
 
