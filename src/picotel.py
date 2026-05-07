@@ -1157,6 +1157,13 @@ def _ssl_context() -> ssl.SSLContext | None:
     system-trust context for HTTPS URLs, and ignores the argument entirely
     for http://.
 
+    Picotel-specific escape hatch: when
+    ``PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY`` is truthy, return an
+    unverified context that disables both certificate and hostname checks.
+    This var is already in picotel's namespace so PICOTEL_PREFIX does NOT
+    remap it; it is read raw from the environment. Skip-verify wins over
+    any CA configuration.
+
     TODO(EVO-010): Add @functools.lru_cache(maxsize=None) once the rest of
         the env parsing is stable. Skipped in the probe so tests can
         mutate env vars with patch.dict() without a cache_clear dance.
@@ -1165,13 +1172,15 @@ def _ssl_context() -> ssl.SSLContext | None:
     TODO(EVO-020): Signal-specific override — accept a `signal` argument
         and consult OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE /
         OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE before falling back here.
-    TODO(EVO-040): Honour PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY —
-        if truthy, short-circuit with a CERT_NONE / check_hostname=False
-        context that overrides any CA configuration.
     TODO(EVO-060): mTLS — if OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE (and
         optionally _CLIENT_KEY) is set, call ctx.load_cert_chain() on the
         returned context before handing it back.
     """
+    skip_verify = os.environ.get("PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY", "")
+    if skip_verify.lower() in ("true", "1"):
+        # S323 is precisely the behaviour this picotel-specific escape hatch
+        # opts into — see the docstring above.
+        return ssl._create_unverified_context()  # noqa: S323
     cafile = os.environ.get(_env("OTEL_EXPORTER_OTLP_CERTIFICATE"))
     if not cafile:
         return None

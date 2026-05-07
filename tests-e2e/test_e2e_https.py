@@ -49,13 +49,26 @@ from picotel import (
 #     EVO-020 lands signal-specific CA vars.
 
 
-@pytest.mark.parametrize("collector", [{"tls": True}], indirect=True)
-def test_send_span_over_https_with_ca_cert(collector):
-    """A span sent to an HTTPS collector is accepted when the CA is trusted.
+@pytest.mark.parametrize(
+    ("collector", "tls_env"),
+    [
+        ({"tls": True}, "ca_cert"),
+        ({"tls": True}, "skip_verify"),
+    ],
+    indirect=["collector"],
+)
+def test_send_span_over_https(collector, tls_env):
+    """A span sent to an HTTPS collector is accepted via either TLS escape hatch.
 
-    This is the single probe-level happy path. It exercises the full
-    chain: env-var-driven CA resolution -> SSLContext construction ->
-    urlopen with context -> TLS handshake -> span delivered.
+    Two routes to the same happy path exercise the full chain
+    (env-var-driven SSLContext -> urlopen with context -> TLS handshake
+    -> span delivered):
+
+    - ``ca_cert``: OTEL_EXPORTER_OTLP_CERTIFICATE points at the self-signed
+      CA PEM; the client builds a context that trusts only that cert.
+    - ``skip_verify``: PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY=true
+      returns an unverified context, proving the client can talk to a TLS
+      server with an untrusted self-signed cert without any CA config.
 
     The shared ``collector`` fixture grows TLS via indirect params rather
     than a parallel fixture; that's the whole architectural question this
@@ -74,13 +87,15 @@ def test_send_span_over_https_with_ca_cert(collector):
         end_time_ns=start + 1_000_000,
     )
 
-    # The probe reads the CA path from OTEL_EXPORTER_OTLP_CERTIFICATE, the
-    # standard OTEL env var. Connect will set this when it spawns picotel
-    # subprocesses alongside its otelcol sidecar (see issue #11 discussion).
-    with patch.dict(
-        os.environ,
-        {"OTEL_EXPORTER_OTLP_CERTIFICATE": str(collector["ca_cert"])},
-    ):
+    # Each case sets exactly the env var that activates its TLS path; the
+    # ca_cert case uses the standard OTEL_ name, the skip-verify case uses
+    # the picotel-specific escape hatch (no CA configured).
+    tls_env_vars = (
+        {"OTEL_EXPORTER_OTLP_CERTIFICATE": str(collector["ca_cert"])}
+        if tls_env == "ca_cert"
+        else {"PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY": "true"}
+    )
+    with patch.dict(os.environ, tls_env_vars):
         result = send_spans(collector["endpoint"], resource, [span])
 
     assert result is True

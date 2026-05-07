@@ -711,6 +711,162 @@ def test_send_spans_passes_ssl_context_from_env_certificate(prefix, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
+# TLS insecure skip-verify (PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_skip"),
+    [
+        ("true", True),
+        ("TRUE", True),
+        ("True", True),
+        ("1", True),
+        ("false", False),
+        ("0", False),
+        ("", False),
+        # Unrecognised values fall through to the CA branch; with no CA
+        # configured the helper returns None.
+        ("yes", False),
+    ],
+)
+def test_ssl_context_skip_verify_truthy_values(value, expected_skip):
+    """PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY honours only the documented truthy set.
+
+    Truthy values ("true"/"TRUE"/"True"/"1") yield an unverified SSLContext
+    with both certificate and hostname verification disabled, so operators
+    can hit self-signed TLS endpoints on trusted networks without
+    configuring a CA. Falsy or unrecognised values fall through to the CA
+    branch; with no CA configured the helper returns None — verifying the
+    skip-verify short-circuit is not accidentally too lenient.
+    """
+    import ssl  # noqa: PLC0415
+
+    with patch.dict(
+        os.environ,
+        {"PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY": value},
+        clear=True,
+    ):
+        ctx = picotel._ssl_context()
+
+    if expected_skip:
+        assert ctx is not None
+        assert ctx.verify_mode == ssl.CERT_NONE
+        assert ctx.check_hostname is False
+    else:
+        # Falsy value falls through to the CA branch; with no CA configured
+        # the helper returns None.
+        assert ctx is None
+
+
+@PREFIXES
+def test_ssl_context_skip_verify_wins_over_ca(prefix, monkeypatch):
+    """Skip-verify short-circuits before any CA lookup.
+
+    When both OTEL_EXPORTER_OTLP_CERTIFICATE and the skip-verify var are
+    set, the returned context has verification fully disabled and
+    ``ssl.create_default_context`` is never called.
+    """
+    import ssl  # noqa: PLC0415
+
+    mock_create = Mock()
+    monkeypatch.setattr(ssl, "create_default_context", mock_create)
+
+    env = _prefixed({"OTEL_EXPORTER_OTLP_CERTIFICATE": "/path/to/ca.pem"}, prefix)
+    env["PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY"] = "true"
+    with patch.dict(os.environ, env, clear=True):
+        ctx = picotel._ssl_context()
+
+    assert ctx is not None
+    assert ctx.verify_mode == ssl.CERT_NONE
+    assert ctx.check_hostname is False
+    mock_create.assert_not_called()
+
+
+def test_ssl_context_skip_verify_not_remapped_by_prefix():
+    """PICOTEL_PREFIX does NOT remap PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY.
+
+    The var is already in picotel's namespace (it starts with PICOTEL_),
+    so setting PICOTEL_PREFIX=FOO must NOT require a FOO_ variant.
+    The raw PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY name continues to
+    work, and a FOO-prefixed variant has no effect.
+    """
+    import ssl  # noqa: PLC0415
+
+    # Raw PICOTEL_ name still honoured under an arbitrary PICOTEL_PREFIX.
+    with patch.dict(
+        os.environ,
+        {
+            "PICOTEL_PREFIX": "FOO",
+            "PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY": "true",
+        },
+        clear=True,
+    ):
+        ctx = picotel._ssl_context()
+    assert ctx is not None
+    assert ctx.verify_mode == ssl.CERT_NONE
+
+    # A FOO_-prefixed variant must NOT trigger skip-verify.
+    with patch.dict(
+        os.environ,
+        {
+            "PICOTEL_PREFIX": "FOO",
+            "FOO_EXPORTER_OTLP_INSECURE_SKIP_VERIFY": "true",
+        },
+        clear=True,
+    ):
+        assert picotel._ssl_context() is None
+
+
+def test_send_spans_passes_skip_verify_context_to_urlopen(monkeypatch):
+    """send_spans hands the unverified SSL context through to urlopen.
+
+    Closes the integration-level gap for PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY
+    mirroring the cert-based integration test above: with skip-verify enabled,
+    the SSLContext built by _ssl_context() must actually reach the transport
+    layer. The real stdlib ssl._create_unverified_context is used (not mocked),
+    so asserting verify_mode == CERT_NONE on the context seen by urlopen proves
+    the whole env -> helper -> sender -> urlopen(context=...) wiring.
+
+    Skip-verify is prefix-invariant by design (already covered by
+    test_ssl_context_skip_verify_not_remapped_by_prefix), so this test does
+    not parametrize over PREFIXES.
+    """
+    import ssl  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    from picotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
+
+    mock_urlopen = Mock(return_value=_mock_response)
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    with patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "https://self-signed:4318",
+            "PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY": "true",
+        },
+        clear=True,
+    ):
+        resource = Resource({"service.name": "test"})
+        span = Span(
+            trace_id=new_trace_id(),
+            span_id=new_span_id(),
+            name="test-span",
+            start_time_ns=now_ns(),
+            end_time_ns=now_ns(),
+        )
+
+        result = send_spans(None, resource, [span])
+
+    assert result is True
+    ctx = mock_urlopen.call_args.kwargs["context"]
+    assert ctx is not None
+    assert ctx.verify_mode == ssl.CERT_NONE
+    assert ctx.check_hostname is False
+
+
+# ---------------------------------------------------------------------------
 # _get_sender() factory
 # ---------------------------------------------------------------------------
 
