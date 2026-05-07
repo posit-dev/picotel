@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import queue
+import ssl
 import sys
 import threading
 import time
@@ -571,7 +572,12 @@ def send_spans(
         request = urllib.request.Request(  # noqa: S310
             url, data=data, headers=headers, method="POST"
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        # context is None for http:// (ignored) and set for https:// when a
+        # CA cert has been configured via env — see _ssl_context() for the
+        # graduation plan (skip-verify, signal overrides, mTLS).
+        with urllib.request.urlopen(  # noqa: S310
+            request, timeout=timeout, context=_ssl_context()
+        ) as response:
             # OTLP spec defines only 200 as successful export
             return response.status == 200  # noqa: PLR2004
     except (urllib.error.URLError, OSError) as e:
@@ -671,7 +677,12 @@ def send_logs(
         request = urllib.request.Request(  # noqa: S310
             url, data=data, headers=headers, method="POST"
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        # See send_spans for the _ssl_context() rationale — shared helper
+        # intentionally, because the probe does not yet differentiate
+        # signals (TODO(EVO-020)).
+        with urllib.request.urlopen(  # noqa: S310
+            request, timeout=timeout, context=_ssl_context()
+        ) as response:
             # OTLP spec defines only 200 as successful export
             return response.status == 200  # noqa: PLR2004
     except (urllib.error.URLError, OSError) as e:
@@ -1133,6 +1144,36 @@ def _parse_headers() -> dict[str, str]:
             key, value = pair.split("=", 1)
             headers[key.strip()] = value.strip()
     return headers
+
+
+def _ssl_context() -> ssl.SSLContext | None:
+    """Return an SSLContext for HTTPS OTLP submission, or None.
+
+    Probe scope: only the standard OTEL env var `OTEL_EXPORTER_OTLP_CERTIFICATE`
+    is honoured. When set, returns a context that trusts only that PEM
+    (so self-signed CAs work without touching the system trust store).
+    When unset, returns None — urllib then uses its default system-trust
+    context for HTTPS URLs, and ignores the argument entirely for http://.
+
+    TODO(EVO-010): Add @functools.lru_cache(maxsize=None) once the rest of
+        the env parsing is stable. Skipped in the probe so tests can
+        mutate env vars with patch.dict() without a cache_clear dance.
+    TODO(EVO-020): Signal-specific override — accept a `signal` argument
+        and consult OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE /
+        OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE before falling back here.
+    TODO(EVO-030): Route all env reads through _env() so PICOTEL_PREFIX
+        remaps these vars the same way it remaps OTEL_EXPORTER_OTLP_*.
+    TODO(EVO-040): Honour PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY —
+        if truthy, short-circuit with a CERT_NONE / check_hostname=False
+        context that overrides any CA configuration.
+    TODO(EVO-060): mTLS — if OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE (and
+        optionally _CLIENT_KEY) is set, call ctx.load_cert_chain() on the
+        returned context before handing it back.
+    """
+    cafile = os.environ.get("OTEL_EXPORTER_OTLP_CERTIFICATE")
+    if not cafile:
+        return None
+    return ssl.create_default_context(cafile=cafile)
 
 
 @functools.lru_cache(maxsize=None)
