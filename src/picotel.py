@@ -572,11 +572,18 @@ def send_spans(
         request = urllib.request.Request(  # noqa: S310
             url, data=data, headers=headers, method="POST"
         )
-        # context is None for http:// (ignored) and set for https:// when a
-        # CA cert has been configured via env — see _ssl_context() for the
-        # graduation plan (skip-verify, mTLS).
+        # context is None for http:// and set for https:// when a CA cert
+        # has been configured via env — see _ssl_context() for the graduation
+        # plan (skip-verify, mTLS). Skipping _ssl_context() entirely on plain
+        # http:// avoids spurious failures when TLS env vars point at
+        # missing/unreadable paths but the endpoint doesn't use TLS.
+        context = (
+            _ssl_context("traces")
+            if urllib.parse.urlparse(url).scheme == "https"
+            else None
+        )
         with urllib.request.urlopen(  # noqa: S310
-            request, timeout=timeout, context=_ssl_context("traces")
+            request, timeout=timeout, context=context
         ) as response:
             # OTLP spec defines only 200 as successful export
             return response.status == 200  # noqa: PLR2004
@@ -679,8 +686,15 @@ def send_logs(
         )
         # See send_spans for the _ssl_context() rationale — "logs" selects
         # the per-signal OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE override when set.
+        # Skip _ssl_context() on plain http:// so TLS env vars pointing at
+        # missing paths can't break a non-TLS send.
+        context = (
+            _ssl_context("logs")
+            if urllib.parse.urlparse(url).scheme == "https"
+            else None
+        )
         with urllib.request.urlopen(  # noqa: S310
-            request, timeout=timeout, context=_ssl_context("logs")
+            request, timeout=timeout, context=context
         ) as response:
             # OTLP spec defines only 200 as successful export
             return response.status == 200  # noqa: PLR2004
@@ -1167,8 +1181,8 @@ def _ssl_context(signal: str = "traces") -> ssl.SSLContext | None:
     PICOTEL_PREFIX remaps them. mTLS is signal-agnostic by design. A
     client cert without any CA configuration still yields a context
     (built from the system trust store) so the cert can be presented;
-    otherwise the mTLS configuration would be silently ignored. A key
-    without a cert is meaningless and returns None.
+    otherwise the mTLS configuration would be silently ignored. A client
+    key without a matching client cert is ignored.
 
     Picotel-specific escape hatch: when
     ``PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY`` is truthy, return an

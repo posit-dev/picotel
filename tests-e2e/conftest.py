@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -18,6 +19,18 @@ TESTS_E2E_DIR = Path(__file__).parent
 CONFIG_PATH = TESTS_E2E_DIR / "config" / "otelcol.yaml"
 TLS_CONFIG_PATH = TESTS_E2E_DIR / "config" / "otelcol-tls.yaml"
 OTELCOL_BINARY = TESTS_E2E_DIR / "infra" / "otelcol"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _strip_sdk_disabled_env():
+    """Prevent OTEL_SDK_DISABLED in the runner shell from short-circuiting e2e sends.
+
+    A dev/CI env with OTEL_SDK_DISABLED=true would make every send return False,
+    producing failures that look like TLS/wire issues. Scrub once per session.
+    Empty string is treated as not-disabled by _is_disabled().
+    """
+    with patch.dict(os.environ, {"OTEL_SDK_DISABLED": "", "PICOTEL_SDK_DISABLED": ""}):
+        yield
 
 
 @pytest.fixture(scope="session")
@@ -60,6 +73,9 @@ def collector(request, otelcol_binary: Path, otelcol_output_file: Path, tmp_path
         picotel._parse_headers,
         picotel._get_resource_from_env,
         picotel._ssl_context,
+        picotel._prefix,
+        picotel._env,
+        picotel._is_disabled,
     ]:
         if hasattr(func, "cache_clear"):
             func.cache_clear()

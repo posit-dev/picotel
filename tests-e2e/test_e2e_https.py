@@ -78,12 +78,12 @@ def test_send_span_over_https(collector, tls_env):
     # Each case sets exactly the env var that activates its TLS path; the
     # ca_cert case uses the standard OTEL_ name, the skip-verify case uses
     # the picotel-specific escape hatch (no CA configured).
-    tls_env_vars = (
+    activating = (
         {"OTEL_EXPORTER_OTLP_CERTIFICATE": str(collector["ca_cert"])}
         if tls_env == "ca_cert"
         else {"PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY": "true"}
     )
-    with patch.dict(os.environ, tls_env_vars):
+    with patch.dict(os.environ, activating, clear=True):
         result = send_spans(collector["endpoint"], resource, [span])
 
     assert result is True
@@ -127,12 +127,13 @@ def test_send_log_over_https(collector, tls_env):
         severity_text="INFO",
     )
 
-    tls_env_vars = (
+    # See test_send_span_over_https for the TLS env activation rationale.
+    activating = (
         {"OTEL_EXPORTER_OTLP_CERTIFICATE": str(collector["ca_cert"])}
         if tls_env == "ca_cert"
         else {"PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY": "true"}
     )
-    with patch.dict(os.environ, tls_env_vars):
+    with patch.dict(os.environ, activating, clear=True):
         result = send_logs(collector["endpoint"], resource, [log])
 
     assert result is True

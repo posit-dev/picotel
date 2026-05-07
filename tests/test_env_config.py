@@ -710,6 +710,75 @@ def test_send_spans_passes_ssl_context_from_env_certificate(prefix, monkeypatch)
     mock_create.assert_called_once_with(cafile="/some/path")
 
 
+def test_send_spans_skips_ssl_context_for_http_endpoint(monkeypatch):
+    """TLS env vars must not break a plain-http send.
+
+    Regression guard for the scheme gate in send_spans: with an ``http://``
+    endpoint, _ssl_context() must be skipped, so a misconfigured cert path
+    cannot raise and urlopen receives context=None.
+    """
+    import urllib.request  # noqa: PLC0415
+
+    from picotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
+
+    mock_urlopen = Mock(return_value=_mock_response)
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    with patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://plain:4318",
+            "OTEL_EXPORTER_OTLP_CERTIFICATE": "/does/not/exist.pem",
+        },
+        clear=True,
+    ):
+        resource = Resource({"service.name": "test"})
+        span = Span(
+            trace_id=new_trace_id(),
+            span_id=new_span_id(),
+            name="test-span",
+            start_time_ns=now_ns(),
+            end_time_ns=now_ns(),
+        )
+        assert send_spans(None, resource, [span]) is True
+
+    assert mock_urlopen.call_args.kwargs["context"] is None
+
+
+def test_send_logs_skips_ssl_context_for_http_endpoint(monkeypatch):
+    """Symmetric to send_spans: TLS env vars must not break a plain-http log send.
+
+    Regression guard for the scheme gate in send_logs: with an ``http://``
+    endpoint, _ssl_context() must be skipped, so a misconfigured cert path
+    cannot raise and urlopen receives context=None.
+    """
+    import urllib.request  # noqa: PLC0415
+
+    from picotel import LogRecord, now_ns  # noqa: PLC0415
+
+    mock_urlopen = Mock(return_value=_mock_response)
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    with patch.dict(
+        os.environ,
+        {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://plain:4318",
+            "OTEL_EXPORTER_OTLP_CERTIFICATE": "/does/not/exist.pem",
+        },
+        clear=True,
+    ):
+        resource = Resource({"service.name": "test"})
+        log = LogRecord(
+            body="test-log",
+            timestamp_ns=now_ns(),
+            severity_number=LogRecord.Severity.INFO,
+            severity_text="INFO",
+        )
+        assert send_logs(None, resource, [log]) is True
+
+    assert mock_urlopen.call_args.kwargs["context"] is None
+
+
 @PREFIXES
 @pytest.mark.parametrize(
     ("signal", "signal_var"),
