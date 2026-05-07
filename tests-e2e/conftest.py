@@ -132,11 +132,7 @@ def _wait_for_collector(
 
 
 def _generate_self_signed_cert(target_dir: Path) -> tuple[Path, Path]:
-    """Generate a self-signed cert + key valid for localhost via openssl.
-
-    TODO(EVO-050): Pure-Python fallback (via ``cryptography``) for hosts
-        where openssl is absent, so Windows CI can run the TLS path.
-    """
+    """Generate a self-signed cert + key valid for localhost via openssl."""
     if shutil.which("openssl") is None:
         pytest.skip("openssl binary not found; required for TLS e2e fixtures")
 
