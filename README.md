@@ -212,6 +212,57 @@ with Span(name="operation") as span:
     pass  # Uses env vars for endpoint and resource
 ```
 
+### HTTPS / TLS
+
+When the OTLP endpoint is `https://...`, picotel configures the TLS client
+from environment variables. Endpoints that are plain `http://` ignore all
+of the variables below.
+
+```bash
+# Trust a private CA (PEM path). The client trusts ONLY this CA; the
+# system trust store is bypassed while this is set.
+export OTEL_EXPORTER_OTLP_CERTIFICATE=/etc/ssl/my-ca.pem
+
+# Optional signal-specific override (wins over the general var above)
+export OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE=/etc/ssl/my-ca.pem
+export OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE=/etc/ssl/my-ca.pem
+
+# mTLS client cert (and optional key; a combined cert+key PEM works
+# with just _CLIENT_CERTIFICATE)
+export OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE=/etc/ssl/client.pem
+export OTEL_EXPORTER_OTLP_CLIENT_KEY=/etc/ssl/client.key
+
+# Picotel-specific escape hatch for self-signed dev collectors.
+# Disables both certificate AND hostname verification. Never use in
+# production. Truthy values: true, TRUE, True, 1.
+export PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY=true
+```
+
+**Default behavior:** with no TLS vars set and an `https://` endpoint,
+picotel uses the system trust store.
+
+**Precedence (standard OTEL):** signal-specific CA
+(`_TRACES_CERTIFICATE` / `_LOGS_CERTIFICATE`) wins over the general
+`OTEL_EXPORTER_OTLP_CERTIFICATE`.
+
+**Precedence (picotel-specific):**
+- `PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY` short-circuits all CA
+  lookup and returns an unverified context. Any configured client cert
+  chain is still loaded onto that context so mTLS against a self-signed
+  server keeps working.
+- mTLS client cert/key are signal-agnostic. Picotel deliberately does
+  NOT honor `_TRACES_CLIENT_CERTIFICATE` or `_LOGS_CLIENT_CERTIFICATE`
+  (a documented deviation from the OTEL spec).
+- A client key without a matching client cert is ignored.
+
+**PICOTEL_PREFIX interaction:** `OTEL_EXPORTER_OTLP_CERTIFICATE`, its
+signal-specific variants, and `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` /
+`_CLIENT_KEY` all get remapped by `PICOTEL_PREFIX` like other `OTEL_*`
+vars (e.g. `PICOTEL_EXPORTER_OTLP_CERTIFICATE`).
+`PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY` is already in picotel's
+namespace and is NOT remapped — it is always read under that exact name
+regardless of `PICOTEL_PREFIX`.
+
 ### Trace Context Propagation
 
 Continue traces from parent processes using W3C Trace Context:

@@ -36,12 +36,6 @@ from picotel import (
     send_spans,
 )
 
-# TODO(EVO-080): Document the new TLS env vars in README.md — add a
-#     "HTTPS / TLS" subsection under "Environment Variables" covering
-#     OTEL_EXPORTER_OTLP_CERTIFICATE (and signal-specific variants),
-#     PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY, mTLS vars, precedence
-#     rules, and PICOTEL_PREFIX interaction.
-
 
 @pytest.mark.parametrize(
     ("collector", "tls_env"),
