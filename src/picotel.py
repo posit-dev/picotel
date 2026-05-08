@@ -572,11 +572,10 @@ def send_spans(
         request = urllib.request.Request(  # noqa: S310
             url, data=data, headers=headers, method="POST"
         )
-        # context is None for http:// and set for https:// when a CA cert
-        # has been configured via env — see _ssl_context() for the graduation
-        # plan (skip-verify, mTLS). Skipping _ssl_context() entirely on plain
-        # http:// avoids spurious failures when TLS env vars point at
-        # missing/unreadable paths but the endpoint doesn't use TLS.
+        # context is None for http:// and for https:// when no TLS env is set;
+        # _ssl_context() returns a context for CA cert, skip-verify, or client
+        # cert (mTLS). Skipping it on plain http:// avoids spurious failures
+        # when TLS env vars point at missing/unreadable paths.
         context = (
             _ssl_context("traces")
             if urllib.parse.urlparse(url).scheme == "https"
@@ -684,10 +683,9 @@ def send_logs(
         request = urllib.request.Request(  # noqa: S310
             url, data=data, headers=headers, method="POST"
         )
-        # See send_spans for the _ssl_context() rationale — "logs" selects
-        # the per-signal OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE override when set.
-        # Skip _ssl_context() on plain http:// so TLS env vars pointing at
-        # missing paths can't break a non-TLS send.
+        # See send_spans for the _ssl_context() rationale; passing "logs"
+        # selects the per-signal OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE override
+        # when set.
         context = (
             _ssl_context("logs")
             if urllib.parse.urlparse(url).scheme == "https"
@@ -1206,9 +1204,13 @@ def _ssl_context(signal: str = "traces") -> ssl.SSLContext | None:
 
     skip_verify = os.environ.get("PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY", "")
     if skip_verify.lower() in ("true", "1"):
-        # S323 is precisely the behaviour this picotel-specific escape hatch
-        # opts into — see the docstring above.
-        return _with_client_cert(ssl._create_unverified_context())  # noqa: S323
+        # Build an unverified context via public APIs. check_hostname must be
+        # cleared before verify_mode, otherwise ssl raises ValueError. See the
+        # docstring above for why this escape hatch is intentional.
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return _with_client_cert(ctx)
     signal_var = _env(f"OTEL_EXPORTER_OTLP_{signal.upper()}_CERTIFICATE")
     cafile = os.environ.get(signal_var) or os.environ.get(
         _env("OTEL_EXPORTER_OTLP_CERTIFICATE")

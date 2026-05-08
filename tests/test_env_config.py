@@ -3,6 +3,7 @@
 """Tests for environment variable configuration."""
 
 import os
+from pathlib import Path
 from typing import Dict
 from unittest.mock import Mock, patch
 
@@ -40,6 +41,45 @@ def _prefixed(env: Dict[str, str], prefix: str) -> Dict[str, str]:
 
 
 PREFIXES = pytest.mark.parametrize("prefix", ["", "PICOTEL"])
+
+
+def _self_signed_pem(tmp_path: Path, subject: str = "/CN=picotel-test-client") -> Path:
+    """Generate a combined self-signed cert+key PEM for TLS tests.
+
+    Skips the caller's test if openssl is not available, matching the
+    sibling helper in tests-e2e/conftest.py.
+
+    :param Path tmp_path: pytest ``tmp_path`` fixture value.
+    :param str subject: X.509 subject string passed to ``openssl req -subj``.
+    """
+    import shutil  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl not available")
+
+    pem_path = tmp_path / "client.pem"
+    subprocess.run(
+        [  # noqa: S607
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(pem_path),
+            "-out",
+            str(pem_path),
+            "-days",
+            "1",
+            "-subj",
+            subject,
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return pem_path
 
 
 # ---------------------------------------------------------------------------
@@ -971,26 +1011,30 @@ def test_ssl_context_skip_verify_truthy_values(value, expected_skip):
 
 @PREFIXES
 def test_ssl_context_skip_verify_wins_over_ca(prefix, monkeypatch):
-    """Skip-verify short-circuits before any CA lookup.
+    """Skip-verify short-circuits CA lookup.
 
-    When both OTEL_EXPORTER_OTLP_CERTIFICATE and the skip-verify var are
-    set, the returned context has verification fully disabled and
-    ``ssl.create_default_context`` is never called.
+    Proves both (a) the resulting context has skip-verify semantics, and
+    (b) the CA branch was never consulted (``create_default_context`` is
+    called with no cafile kwarg). The two assertions together catch a
+    regression where skip-verify falls through to the CA branch, which
+    would instead call ``create_default_context(cafile="/path/to/ca.pem")``.
     """
     import ssl  # noqa: PLC0415
 
-    mock_create = Mock()
-    monkeypatch.setattr(ssl, "create_default_context", mock_create)
-
     env = _prefixed({"OTEL_EXPORTER_OTLP_CERTIFICATE": "/path/to/ca.pem"}, prefix)
     env["PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY"] = "true"
+
+    real_create = ssl.create_default_context
+    mock_create = Mock(wraps=real_create)
+    monkeypatch.setattr(ssl, "create_default_context", mock_create)
+
     with patch.dict(os.environ, env, clear=True):
         ctx = picotel._ssl_context()
 
     assert ctx is not None
     assert ctx.verify_mode == ssl.CERT_NONE
     assert ctx.check_hostname is False
-    mock_create.assert_not_called()
+    mock_create.assert_called_once_with()
 
 
 def test_ssl_context_skip_verify_not_remapped_by_prefix():
@@ -1036,9 +1080,9 @@ def test_send_spans_passes_skip_verify_context_to_urlopen(monkeypatch):
     Closes the integration-level gap for PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY
     mirroring the cert-based integration test above: with skip-verify enabled,
     the SSLContext built by _ssl_context() must actually reach the transport
-    layer. The real stdlib ssl._create_unverified_context is used (not mocked),
-    so asserting verify_mode == CERT_NONE on the context seen by urlopen proves
-    the whole env -> helper -> sender -> urlopen(context=...) wiring.
+    layer. The real stdlib ssl APIs are used (not mocked), so asserting
+    verify_mode == CERT_NONE on the context seen by urlopen proves the whole
+    env -> helper -> sender -> urlopen(context=...) wiring.
 
     Skip-verify is prefix-invariant by design (already covered by
     test_ssl_context_skip_verify_not_remapped_by_prefix), so this test does
@@ -1196,34 +1240,49 @@ def test_ssl_context_client_key_without_cert_returns_none():
         assert picotel._ssl_context() is None
 
 
-def test_ssl_context_skip_verify_keeps_client_cert(monkeypatch):
-    """Skip-verify does not drop the client cert chain.
+def test_ssl_context_skip_verify_keeps_client_cert(tmp_path, monkeypatch):
+    """Skip-verify composes with mTLS: client cert loads into the unverified context.
 
-    mTLS against a skip-verify endpoint is a legitimate dev setup
-    (self-signed server cert, real client cert). The unverified context
-    must still have ``load_cert_chain`` called on it.
+    Proves the skip-verify branch calls ``load_cert_chain`` with the
+    configured client cert path — catching a regression where skip-verify
+    silently discards the mTLS configuration. The PEM is real and the
+    real loader runs (the spy wraps the bound method on the returned
+    context), so a kwarg signature drift would raise against the
+    filesystem rather than pass silently against a pure Mock.
     """
     import ssl  # noqa: PLC0415
 
-    sentinel_ctx = Mock()
-    mock_create_unverified = Mock(return_value=sentinel_ctx)
-    monkeypatch.setattr(ssl, "_create_unverified_context", mock_create_unverified)
+    client_pem = _self_signed_pem(tmp_path)
 
-    with patch.dict(
-        os.environ,
-        {
-            "PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY": "true",
-            "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE": "/path/to/client.pem",
-            "OTEL_EXPORTER_OTLP_CLIENT_KEY": "/path/to/client.key",
-        },
-        clear=True,
-    ):
-        result = picotel._ssl_context()
+    # Spy on load_cert_chain at the instance level: wrap create_default_context
+    # so the returned context's bound load_cert_chain is a Mock(wraps=...).
+    # A class-level monkeypatch on SSLContext.load_cert_chain does not receive
+    # ``self`` (Mock objects are not descriptors), which would break wraps and
+    # lose the real-PEM kwarg-drift protection.
+    real_create = ssl.create_default_context
+    load_spy = None
 
-    assert result is sentinel_ctx
-    sentinel_ctx.load_cert_chain.assert_called_once_with(
-        certfile="/path/to/client.pem", keyfile="/path/to/client.key"
-    )
+    def spy_create(*args, **kwargs):
+        nonlocal load_spy
+        ctx = real_create(*args, **kwargs)
+        ctx.load_cert_chain = Mock(wraps=ctx.load_cert_chain)
+        load_spy = ctx.load_cert_chain
+        return ctx
+
+    monkeypatch.setattr(ssl, "create_default_context", spy_create)
+
+    env = {
+        "PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY": "true",
+        "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE": str(client_pem),
+    }
+    with patch.dict(os.environ, env, clear=True):
+        ctx = picotel._ssl_context()
+
+    assert isinstance(ctx, ssl.SSLContext)
+    assert ctx.verify_mode == ssl.CERT_NONE
+    assert ctx.check_hostname is False
+    assert load_spy is not None
+    load_spy.assert_called_once_with(certfile=str(client_pem), keyfile=None)
 
 
 def test_ssl_context_client_cert_loaded_onto_server_ca_context(monkeypatch):
@@ -1269,39 +1328,14 @@ def test_send_spans_passes_client_cert_context_to_urlopen(monkeypatch, tmp_path)
     ``load_cert_chain`` drifted (e.g. malformed path or wrong keyword),
     the call would raise here rather than silently pass against a Mock.
     """
-    import shutil  # noqa: PLC0415
     import ssl  # noqa: PLC0415
-    import subprocess  # noqa: PLC0415
     import urllib.request  # noqa: PLC0415
 
     from picotel import Span, new_span_id, new_trace_id, now_ns  # noqa: PLC0415
 
-    if shutil.which("openssl") is None:
-        pytest.skip("openssl not available")
-
     # Combined cert+key PEM — load_cert_chain accepts keyfile=None in that case,
     # which also exercises the "client cert only" path of _with_client_cert.
-    client_pem = tmp_path / "client.pem"
-    subprocess.run(
-        [  # noqa: S607
-            "openssl",
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-keyout",
-            str(client_pem),
-            "-out",
-            str(client_pem),
-            "-days",
-            "1",
-            "-subj",
-            "/CN=picotel-test-client",
-        ],
-        check=True,
-        capture_output=True,
-    )
+    client_pem = _self_signed_pem(tmp_path)
 
     mock_urlopen = Mock(return_value=_mock_response)
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
