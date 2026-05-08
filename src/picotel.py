@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import queue
+import ssl
 import sys
 import threading
 import time
@@ -571,7 +572,18 @@ def send_spans(
         request = urllib.request.Request(  # noqa: S310
             url, data=data, headers=headers, method="POST"
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        # context is None for http:// and for https:// when no TLS env is set;
+        # _ssl_context() returns a context for CA cert, skip-verify, or client
+        # cert (mTLS). Skipping it on plain http:// avoids spurious failures
+        # when TLS env vars point at missing/unreadable paths.
+        context = (
+            _ssl_context("traces")
+            if urllib.parse.urlparse(url).scheme == "https"
+            else None
+        )
+        with urllib.request.urlopen(  # noqa: S310
+            request, timeout=timeout, context=context
+        ) as response:
             # OTLP spec defines only 200 as successful export
             return response.status == 200  # noqa: PLR2004
     except (urllib.error.URLError, OSError) as e:
@@ -671,7 +683,17 @@ def send_logs(
         request = urllib.request.Request(  # noqa: S310
             url, data=data, headers=headers, method="POST"
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        # See send_spans for the _ssl_context() rationale; passing "logs"
+        # selects the per-signal OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE override
+        # when set.
+        context = (
+            _ssl_context("logs")
+            if urllib.parse.urlparse(url).scheme == "https"
+            else None
+        )
+        with urllib.request.urlopen(  # noqa: S310
+            request, timeout=timeout, context=context
+        ) as response:
             # OTLP spec defines only 200 as successful export
             return response.status == 200  # noqa: PLR2004
     except (urllib.error.URLError, OSError) as e:
@@ -1133,6 +1155,73 @@ def _parse_headers() -> dict[str, str]:
             key, value = pair.split("=", 1)
             headers[key.strip()] = value.strip()
     return headers
+
+
+@functools.lru_cache(maxsize=None)
+def _ssl_context(signal: str = "traces") -> ssl.SSLContext | None:
+    """Return an SSLContext for HTTPS OTLP submission, or None.
+
+    Signal-specific CA precedence mirrors _get_endpoint(): the
+    per-signal env var `OTEL_EXPORTER_OTLP_{SIGNAL}_CERTIFICATE` wins
+    over the general `OTEL_EXPORTER_OTLP_CERTIFICATE`. Both names are
+    routed through _env() so PICOTEL_PREFIX remaps them like the other
+    OTEL_EXPORTER_OTLP_* vars. When set, returns a context that trusts
+    only that PEM (so self-signed CAs work without touching the system
+    trust store). When unset, returns None — urllib then uses its
+    default system-trust context for HTTPS URLs, and ignores the
+    argument entirely for http://.
+
+    Client certificate (mTLS) support: when
+    ``OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE`` is set, its chain is
+    loaded onto the returned context via ``load_cert_chain``.
+    ``OTEL_EXPORTER_OTLP_CLIENT_KEY`` is optional (a single PEM may
+    embed both cert and key). Both names are routed through _env() so
+    PICOTEL_PREFIX remaps them. mTLS is signal-agnostic by design. A
+    client cert without any CA configuration still yields a context
+    (built from the system trust store) so the cert can be presented;
+    otherwise the mTLS configuration would be silently ignored. A client
+    key without a matching client cert is ignored.
+
+    Picotel-specific escape hatch: when
+    ``PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY`` is truthy, return an
+    unverified context that disables both certificate and hostname checks.
+    This var is already in picotel's namespace so PICOTEL_PREFIX does NOT
+    remap it; it is read raw from the environment. Skip-verify is
+    signal-agnostic by design (it's a picotel escape hatch, not an OTEL
+    spec var) and wins over any CA configuration — any configured
+    client cert chain is still loaded onto the unverified context so
+    mTLS against a self-signed server (dev setups) keeps working.
+
+    :param signal: The signal type - "traces" or "logs"
+    """
+    client_cert = os.environ.get(_env("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE"))
+    client_key = os.environ.get(_env("OTEL_EXPORTER_OTLP_CLIENT_KEY"))
+
+    def _with_client_cert(ctx: ssl.SSLContext) -> ssl.SSLContext:
+        if client_cert:
+            ctx.load_cert_chain(certfile=client_cert, keyfile=client_key or None)
+        return ctx
+
+    skip_verify = os.environ.get("PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY", "")
+    if skip_verify.lower() in ("true", "1"):
+        # Build an unverified context via public APIs. check_hostname must be
+        # cleared before verify_mode, otherwise ssl raises ValueError. See the
+        # docstring above for why this escape hatch is intentional.
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return _with_client_cert(ctx)
+    signal_var = _env(f"OTEL_EXPORTER_OTLP_{signal.upper()}_CERTIFICATE")
+    cafile = os.environ.get(signal_var) or os.environ.get(
+        _env("OTEL_EXPORTER_OTLP_CERTIFICATE")
+    )
+    if cafile:
+        return _with_client_cert(ssl.create_default_context(cafile=cafile))
+    if client_cert:
+        # Client cert alone still needs a context so the cert can be presented;
+        # fall back to the system trust store for server verification.
+        return _with_client_cert(ssl.create_default_context())
+    return None
 
 
 @functools.lru_cache(maxsize=None)
