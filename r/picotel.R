@@ -235,20 +235,173 @@ now_ns <- function() {
 # .picotel_endpoint(signal) — resolve full OTLP endpoint URL for "traces" or
 # "logs", applying signal-specific > general precedence and appending "/v1/<signal>"
 # to the general endpoint.  Caches in .picotel_state.
+#
+# Mirrors Python's _get_endpoint() which is decorated with @functools.lru_cache —
+# i.e. Python also caches.  The result is stored under
+# .picotel_state$endpoint_<signal> so .picotel_reset_state() clears it.
+#
+# Precedence (matches Python exactly):
+#   1. OTEL_EXPORTER_OTLP_{SIGNAL}_ENDPOINT  — used verbatim if set.
+#   2. OTEL_EXPORTER_OTLP_ENDPOINT           — trailing "/" stripped, then
+#      "/v1/<signal>" appended (Python: base.rstrip("/") + "/v1/<signal>").
+#   3. Returns NULL when neither is set.
+#
+# Both variable names are resolved via .picotel_env() to honour PICOTEL_PREFIX.
 .picotel_endpoint <- function(signal = "traces") {
-  stop("TODO(WP2): .picotel_endpoint")
+  cache_key <- paste0("endpoint_", signal)
+  cached <- .picotel_state[[cache_key]]
+  if (!is.null(cached)) {
+    # cached[[1]] holds the value; cached[[2]] is TRUE when the cached result
+    # is a real value vs. a "not-found" sentinel.
+    if (isTRUE(cached$found)) {
+      return(cached$value)
+    } else {
+      return(NULL)
+    }
+  }
+
+  # Signal-specific variable takes precedence and is used verbatim.
+  signal_var <- .picotel_env(
+    paste0("OTEL_EXPORTER_OTLP_", toupper(signal), "_ENDPOINT")
+  )
+  specific <- Sys.getenv(signal_var, unset = NA_character_)
+  if (!is.na(specific)) {
+    .picotel_state[[cache_key]] <- list(found = TRUE, value = specific)
+    return(specific)
+  }
+
+  # Fall back to the general endpoint with /v1/<signal> appended.
+  general_var <- .picotel_env("OTEL_EXPORTER_OTLP_ENDPOINT")
+  base <- Sys.getenv(general_var, unset = "")
+  if (nchar(base) > 0L) {
+    url <- paste0(sub("/+$", "", base), "/v1/", signal)
+    .picotel_state[[cache_key]] <- list(found = TRUE, value = url)
+    return(url)
+  }
+
+  # Neither is set.
+  .picotel_state[[cache_key]] <- list(found = FALSE, value = NULL)
+  NULL
 }
 
-# .picotel_resource_from_env() — build a Resource from OTEL_RESOURCE_ATTRIBUTES
-# and OTEL_SERVICE_NAME (W3C Baggage percent-decoding).
+# .picotel_url_decode(s) — lenient percent-decoder mirroring Python's
+# urllib.parse.unquote(): decodes %XX sequences but keeps the raw string
+# on invalid sequences (rather than erroring).  '+' is NOT decoded as a
+# space (path-unescape semantics, not query-unescape).
+#
+# utils::URLdecode() emits a warning and returns "" for out-of-range bytes;
+# we catch that warning and fall back to the raw input.
+.picotel_url_decode <- function(s) {
+  tryCatch(
+    utils::URLdecode(s),
+    warning = function(w) s
+  )
+}
+
+# .picotel_resource_from_env() — build a picotel_resource from OTEL_RESOURCE_ATTRIBUTES
+# and OTEL_SERVICE_NAME (W3C Baggage percent-decoding).  Caches result in
+# .picotel_state$resource.
+#
+# Mirrors Python's _get_resource_from_env() (@functools.lru_cache):
+#   - OTEL_RESOURCE_ATTRIBUTES: comma-separated "key=value" pairs; keys and
+#     values are percent-decoded (W3C Baggage spec).  Malformed pairs (no "=")
+#     are silently skipped.  All attribute values are strings.
+#   - OTEL_SERVICE_NAME overrides any "service.name" from resource attrs.
+#   - Returns NULL (Python: None) when no configuration is found.
+#
+# Both variable names are resolved via .picotel_env() to honour PICOTEL_PREFIX.
 .picotel_resource_from_env <- function() {
-  stop("TODO(WP2): .picotel_resource_from_env")
+  if (exists("resource", envir = .picotel_state, inherits = FALSE)) {
+    return(.picotel_state$resource)
+  }
+
+  attrs <- list()
+
+  res_attrs_str <- Sys.getenv(
+    .picotel_env("OTEL_RESOURCE_ATTRIBUTES"), unset = ""
+  )
+  if (nchar(res_attrs_str) > 0L) {
+    for (pair in strsplit(res_attrs_str, ",", fixed = TRUE)[[1L]]) {
+      eq_pos <- regexpr("=", pair, fixed = TRUE)[[1L]]
+      if (eq_pos < 1L) {
+        # No "=" — malformed pair; skip.
+        next
+      }
+      raw_key <- substring(pair, 1L, eq_pos - 1L)
+      raw_val <- substring(pair, eq_pos + 1L)
+      key <- .picotel_url_decode(raw_key)
+      val <- .picotel_url_decode(raw_val)
+      attrs[[key]] <- val
+    }
+  }
+
+  service_name <- Sys.getenv(
+    .picotel_env("OTEL_SERVICE_NAME"), unset = ""
+  )
+  if (nchar(service_name) > 0L) {
+    attrs[["service.name"]] <- service_name
+  }
+
+  result <- if (length(attrs) == 0L) NULL else picotel_resource(attrs)
+  .picotel_state$resource <- result
+  result
 }
 
 # .picotel_parse_traceparent() — parse the W3C TRACEPARENT env var (or its
 # prefixed variant).  Returns list(trace_id, parent_id, flags) or NULL.
+# Caches result in .picotel_state$traceparent.
+#
+# Mirrors Python's _parse_traceparent() (@functools.lru_cache):
+#   - Reads env var via .picotel_env("TRACEPARENT") (honours PICOTEL_PREFIX).
+#   - Format: "{version}-{trace_id}-{parent_id}-{trace_flags}"
+#   - Exactly 4 "-"-delimited parts; version must be "00".
+#   - trace_id:  32 hex chars  [0-9a-fA-F]
+#   - parent_id: 16 hex chars  [0-9a-fA-F]
+#   - flags:      2 hex chars  [0-9a-fA-F]; parsed as hex integer.
+#   - Case is preserved in the returned strings (Python does not normalise).
+#   - Returns NULL on any validation failure or when the var is unset/empty.
+#
+# Note: Python does NOT reject all-zeros trace_id or parent_id; neither do we.
 .picotel_parse_traceparent <- function() {
-  stop("TODO(WP2): .picotel_parse_traceparent")
+  if (exists("traceparent", envir = .picotel_state, inherits = FALSE)) {
+    return(.picotel_state$traceparent)
+  }
+
+  tp_var  <- .picotel_env("TRACEPARENT")
+  tp_str  <- Sys.getenv(tp_var, unset = "")
+
+  result <- if (nchar(tp_str) == 0L) {
+    NULL
+  } else {
+    parts <- strsplit(tp_str, "-", fixed = TRUE)[[1L]]
+    if (length(parts) != 4L || parts[[1L]] != "00") {
+      NULL
+    } else {
+      trace_id  <- parts[[2L]]
+      parent_id <- parts[[3L]]
+      flags_str <- parts[[4L]]
+      hex_re    <- "^[0-9a-fA-F]+$"
+      if (
+        nchar(trace_id)  == 32L &&
+        nchar(parent_id) == 16L &&
+        nchar(flags_str) == 2L  &&
+        grepl(hex_re, trace_id,  perl = TRUE) &&
+        grepl(hex_re, parent_id, perl = TRUE) &&
+        grepl(hex_re, flags_str, perl = TRUE)
+      ) {
+        list(
+          trace_id  = trace_id,
+          parent_id = parent_id,
+          flags     = strtoi(flags_str, base = 16L)
+        )
+      } else {
+        NULL
+      }
+    }
+  }
+
+  .picotel_state$traceparent <- result
+  result
 }
 
 
