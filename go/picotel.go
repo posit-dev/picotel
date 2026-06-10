@@ -17,6 +17,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -110,7 +111,7 @@ func NowNS() int64 { return time.Now().UnixNano() }
 // TraceparentFromEnv reads the W3C traceparent from the environment (respecting
 // any PICOTEL_PREFIX remap). Delegates to the cached parseTraceparentEnv.
 func TraceparentFromEnv() (traceID, parentSpanID string, traceFlags uint32, ok bool) {
-	panic("picotel: TODO(WP2)")
+	return parseTraceparentEnv()
 }
 
 // ============================================================================
@@ -437,8 +438,25 @@ func endpointFromEnv(signal string) string {
 }
 
 // computeEndpoint computes the OTLP endpoint URL from env vars. (WP2)
+//
+// Mirrors Python's _get_endpoint():
+//   - Signal-specific var (OTEL_EXPORTER_OTLP_{TRACES|LOGS}_ENDPOINT) is used
+//     verbatim if set (even if empty string — empty string means "set but empty").
+//   - Otherwise the base OTEL_EXPORTER_OTLP_ENDPOINT has /v1/{signal} appended
+//     (trailing slashes stripped first, matching Python's base.rstrip("/")).
+//   - Returns "" when nothing is set.
 func computeEndpoint(signal string) string {
-	panic("picotel: TODO(WP2)")
+	// Signal-specific variable takes precedence and is used verbatim.
+	signalVar := "OTEL_EXPORTER_OTLP_" + strings.ToUpper(signal) + "_ENDPOINT"
+	if specific, ok := os.LookupEnv(envName(signalVar)); ok {
+		return specific
+	}
+	// Fall back to base endpoint with /v1/{signal} appended.
+	base := envValue("OTEL_EXPORTER_OTLP_ENDPOINT")
+	if base == "" {
+		return ""
+	}
+	return strings.TrimRight(base, "/") + "/v1/" + signal
 }
 
 // headersFromEnv returns the cached map of OTLP export headers parsed from
@@ -462,8 +480,49 @@ func resourceFromEnv() *Resource {
 
 // computeResource builds a Resource from OTEL_RESOURCE_ATTRIBUTES and
 // OTEL_SERVICE_NAME. (WP2)
+//
+// Mirrors Python's _get_resource_from_env():
+//   - OTEL_RESOURCE_ATTRIBUTES is parsed as comma-separated key=value pairs
+//     (W3C Baggage style). Values are percent-decoded via url.PathUnescape
+//     (NOT QueryUnescape — '+' must stay '+'). On decode error, the raw value
+//     is kept (mirroring Python's lenient urllib.parse.unquote behavior).
+//   - Malformed pairs (missing '=') are skipped. Pairs with empty keys or
+//     values are included after decode (Python does not filter them out).
+//   - OTEL_SERVICE_NAME overrides any "service.name" from resource attrs.
+//   - Returns nil when no configuration is found (matching Python's None).
 func computeResource() *Resource {
-	panic("picotel: TODO(WP2)")
+	attrs := map[string]any{}
+
+	if resAttrsStr := envValue("OTEL_RESOURCE_ATTRIBUTES"); resAttrsStr != "" {
+		for _, pair := range strings.Split(resAttrsStr, ",") {
+			eqIdx := strings.IndexByte(pair, '=')
+			if eqIdx < 0 {
+				// No '=' — malformed pair; skip (matches Python behavior).
+				continue
+			}
+			rawKey := pair[:eqIdx]
+			rawVal := pair[eqIdx+1:]
+
+			key, err := url.PathUnescape(rawKey)
+			if err != nil {
+				key = rawKey
+			}
+			val, err := url.PathUnescape(rawVal)
+			if err != nil {
+				val = rawVal
+			}
+			attrs[key] = val
+		}
+	}
+
+	if serviceName := envValue("OTEL_SERVICE_NAME"); serviceName != "" {
+		attrs["service.name"] = serviceName
+	}
+
+	if len(attrs) == 0 {
+		return nil
+	}
+	return &Resource{Attributes: attrs}
 }
 
 // parseTraceparentEnv returns the cached W3C traceparent parsed from the
@@ -478,8 +537,63 @@ func parseTraceparentEnv() (traceID, spanID string, flags uint32, ok bool) {
 }
 
 // computeTraceparent parses the TRACEPARENT env var. (WP2)
+//
+// Mirrors Python's _parse_traceparent() exactly:
+//   - Reads TRACEPARENT via envValue (prefix-remap applies).
+//   - Empty/unset → (_, _, _, false).
+//   - Must split into exactly 4 '-'-delimited parts; part[0] must equal "00".
+//   - trace_id: 32 hex chars; parent_id: 16 hex chars; flags: 2 hex chars.
+//   - All hex fields must consist solely of [0-9a-fA-F].
+//   - flags parsed as hex into uint32.
+//   - Returns the raw string values (case-preserved), matching Python.
 func computeTraceparent() (string, string, uint32, bool) {
-	panic("picotel: TODO(WP2)")
+	tp := envValue("TRACEPARENT")
+	if tp == "" {
+		return "", "", 0, false
+	}
+
+	parts := strings.Split(tp, "-")
+	if len(parts) != 4 || parts[0] != "00" {
+		return "", "", 0, false
+	}
+
+	traceID := parts[1]
+	parentID := parts[2]
+	flagsStr := parts[3]
+
+	if len(traceID) != 32 || len(parentID) != 16 || len(flagsStr) != 2 {
+		return "", "", 0, false
+	}
+
+	if !isAllHex(traceID) || !isAllHex(parentID) || !isAllHex(flagsStr) {
+		return "", "", 0, false
+	}
+
+	// Parse flags as hex; we already validated it's 2 hex chars so no error expected.
+	var flags uint32
+	for _, c := range flagsStr {
+		flags <<= 4
+		switch {
+		case c >= '0' && c <= '9':
+			flags |= uint32(c - '0')
+		case c >= 'a' && c <= 'f':
+			flags |= uint32(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			flags |= uint32(c-'A') + 10
+		}
+	}
+
+	return traceID, parentID, flags, true
+}
+
+// isAllHex returns true when every byte of s is a valid hex character.
+func isAllHex(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // tlsClientConfig returns the cached *tls.Config for the given signal.
