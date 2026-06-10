@@ -8,15 +8,20 @@
 package picotel
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -448,9 +453,29 @@ func headersFromEnv() map[string]string {
 	return headersCache.val
 }
 
-// computeHeaders parses OTEL_EXPORTER_OTLP_HEADERS. (WP2)
+// computeHeaders parses OTEL_EXPORTER_OTLP_HEADERS. (WP4)
+//
+// Port of Python's _parse_headers(): splits on comma, then splits each pair on
+// the first "=", strips whitespace from both key and value. Pairs missing "="
+// are skipped. Empty string or unset → empty map.
 func computeHeaders() map[string]string {
-	panic("picotel: TODO(WP2)")
+	raw := envValue("OTEL_EXPORTER_OTLP_HEADERS")
+	if raw == "" {
+		return map[string]string{}
+	}
+	headers := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		idx := strings.Index(pair, "=")
+		if idx < 0 {
+			// No "=" — skip this pair (mirrors Python's `if "=" in pair` guard)
+			continue
+		}
+		key := strings.TrimSpace(pair[:idx])
+		value := strings.TrimSpace(pair[idx+1:])
+		headers[key] = value
+	}
+	return headers
 }
 
 // resourceFromEnv returns the cached Resource built from env vars. Computation
@@ -493,8 +518,74 @@ func tlsClientConfig(signal string) (*tls.Config, error) {
 }
 
 // computeTLSConfig builds a *tls.Config from OTEL TLS env vars. (WP4)
+//
+// Port of Python's _ssl_context():
+//   - PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY read RAW (never prefix-remapped).
+//     Truthy → InsecureSkipVerify; skip CA loading; STILL load client cert.
+//   - CA: signal-specific OTEL_EXPORTER_OTLP_{TRACES|LOGS}_CERTIFICATE overrides
+//     OTEL_EXPORTER_OTLP_CERTIFICATE. When set: read PEM, AppendCertsFromPEM →
+//     RootCAs trusts only that CA.
+//   - mTLS: OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE + optional CLIENT_KEY.
+//     When key is unset, pass certPath as both args (combined PEM). Key without
+//     cert is ignored.
+//   - No TLS env vars and no skip-verify → return (nil, nil).
 func computeTLSConfig(signal string) (*tls.Config, error) {
-	panic("picotel: TODO(WP4)")
+	// mTLS vars — always read, applied at the end if configured.
+	clientCert := envValue("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE")
+	clientKey := envValue("OTEL_EXPORTER_OTLP_CLIENT_KEY")
+
+	// txWithClientCert loads the client cert onto cfg if configured.
+	txWithClientCert := func(cfg *tls.Config) (*tls.Config, error) {
+		if clientCert == "" {
+			return cfg, nil
+		}
+		keyPath := clientKey
+		if keyPath == "" {
+			// Combined PEM — mirrors Python's keyfile=None by passing certfile as both.
+			keyPath = clientCert
+		}
+		pair, err := tls.LoadX509KeyPair(clientCert, keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("picotel: loading client cert/key: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{pair}
+		return cfg, nil
+	}
+
+	// Skip-verify: read RAW — PICOTEL_PREFIX does NOT remap this var.
+	skipVerifyRaw := os.Getenv("PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY")
+	if isTruthy(skipVerifyRaw) {
+		cfg := &tls.Config{InsecureSkipVerify: true} //nolint:gosec // intentional escape hatch
+		return txWithClientCert(cfg)
+	}
+
+	// CA certificate: signal-specific takes precedence.
+	caFile := envValue(fmt.Sprintf("OTEL_EXPORTER_OTLP_%s_CERTIFICATE", strings.ToUpper(signal)))
+	if caFile == "" {
+		caFile = envValue("OTEL_EXPORTER_OTLP_CERTIFICATE")
+	}
+
+	if caFile != "" {
+		pemBytes, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("picotel: reading CA cert %q: %w", caFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemBytes) {
+			return nil, fmt.Errorf("picotel: no valid PEM certificates found in %q", caFile)
+		}
+		cfg := &tls.Config{RootCAs: pool}
+		return txWithClientCert(cfg)
+	}
+
+	// No CA — if there's a client cert, still need a tls.Config with system trust.
+	if clientCert != "" {
+		cfg := &tls.Config{}
+		return txWithClientCert(cfg)
+	}
+
+	// No TLS vars set → system trust (nil config).
+	return nil, nil
 }
 
 // httpClient returns the cached *http.Client for the given signal.
@@ -504,8 +595,19 @@ func httpClient(signal string) *http.Client {
 }
 
 // buildHTTPClient builds an *http.Client for the given signal. (WP4)
+//
+// Uses the cached TLS config from tlsClientConfig(signal). If TLS config
+// errored, the client is built with nil TLS config — the error is surfaced
+// by postJSON (which re-checks tlsClientConfig on https URLs), not here.
+// No Client.Timeout is set; callers use per-request contexts instead.
 func buildHTTPClient(signal string) *http.Client {
-	panic("picotel: TODO(WP4)")
+	cfg, _ := tlsClientConfig(signal) // error handled in postJSON for https
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
+			TLSClientConfig: cfg,
+		},
+	}
 }
 
 // resetCaches reinstalls fresh sync.Once values for all caches and resets the
@@ -529,9 +631,61 @@ func resetCaches() {
 // ============================================================================
 
 // postJSON serialises payload as JSON and POSTs it to url, using the
-// signal-specific HTTP client and request timeout.
-func postJSON(url string, payload any, signal string, timeout time.Duration) error {
-	panic("picotel: TODO(WP4)")
+// signal-specific HTTP client and request timeout. (WP4)
+//
+// Rules:
+//   - timeout <= 0 → defaultTimeout (2s).
+//   - https URL: call tlsClientConfig(signal); error → return it immediately.
+//   - http URL: skip TLS config entirely (bad cert paths must not break plain HTTP).
+//   - Sets Content-Type: application/json plus all headers from headersFromEnv().
+//   - Drains and closes response body.
+//   - Status 200 → nil. Non-200 → error with status code and URL.
+//   - Network errors returned as-is. No logging — caller logs.
+func postJSON(rawURL string, payload any, signal string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+
+	// Scheme gate: for https, validate TLS config early so a bad cert path
+	// surfaces as a clear error rather than a TLS handshake failure.
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("picotel: invalid URL %q: %w", rawURL, err)
+	}
+	if parsed.Scheme == "https" {
+		if _, err := tlsClientConfig(signal); err != nil {
+			return err
+		}
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("picotel: marshalling payload: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("picotel: building request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headersFromEnv() {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := httpClient(signal).Do(req)
+	if err != nil {
+		return fmt.Errorf("picotel: sending to %s: %w", rawURL, err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("picotel: unexpected status %d from %s", resp.StatusCode, rawURL)
+	}
+	return nil
 }
 
 // ============================================================================
