@@ -1058,31 +1058,409 @@ now_ns <- function() {
 
 
 # ==== WP5: Senders + flush ====
+#
+# R DEVIATION: R is single-threaded — there is no background worker.
+# The async sender is a DEFERRAL QUEUE; submit() only enqueues (O(1), never
+# blocks); execution happens exclusively in picotel_flush(timeout) or
+# opportunistically via the on-exit finalizer registered below.
+#
+# Limitation: Unlike Python's daemon thread, telemetry deferred by the async
+# sender is NOT delivered unless picotel_flush() is called (or the process
+# exits cleanly enough to trigger the reg.finalizer hook).  In particular,
+# parallel::mclapply child processes inherit the queue but the finalizer may
+# not fire in worker forks — use the sync sender in forked code.
+#
+# ---------------------------------------------------------------------------
+# Failure classification table (ported from _SyncSender.submit / _worker)
+# ---------------------------------------------------------------------------
+#
+#  fn() outcome                    | Classification | Counter action
+#  ---------------------------------+----------------+------------------------
+#  Returns any value                | Success        | reset to 0
+#    (except identical(r, FALSE))   |                |
+#  Returns identical(result, FALSE) | Persistent     | +1 (may trip at 5)
+#  Raises picotel_config_error      | Persistent     | +1 + log config error
+#  Raises picotel_disabled          | Neutral        | unchanged (no reset)
+#  Raises any other error           | Transient      | unchanged (no reset)
+#  ---------------------------------+----------------+------------------------
+#
+# "Persistent" failure: increments consecutive_failures counter; at
+#   .picotel_MAX_CONSECUTIVE_ERRORS (5) the breaker trips permanently.
+# "Success":    resets counter to 0.
+# "Transient":  logged but counter is neither incremented nor reset.
+# "Neutral":    picotel_disabled — like Python's pre-submit disabled check,
+#               or Go's errors.Is(ErrDisabled) path — no counter change.
+#
+# Python note:  _SyncSender.submit uses `result is False` (strict identity).
+#   R equivalent: identical(result, FALSE) — only boolean FALSE, not NULL/0.
+#
+# picotel_disabled: R equivalent of Go's ErrDisabled.  A submitted closure
+#   that detects OTEL_SDK_DISABLED can raise this to take the neutral path.
+#   Raise with: stop(.picotel_disabled_condition())
+# ---------------------------------------------------------------------------
 
+# .picotel_disabled_condition() — create a picotel_disabled condition.
+# Analogous to Go's ErrDisabled; raised inside a submitted closure to signal
+# "SDK disabled — do not count toward the circuit breaker".
+.picotel_disabled_condition <- function() {
+  structure(
+    class = c("picotel_disabled", "error", "condition"),
+    list(message = "picotel: sdk disabled")
+  )
+}
+
+# Maximum consecutive persistent failures before the circuit breaker trips.
+# Matches Python's _MAX_CONSECUTIVE_ERRORS = 5 and Go's maxConsecutiveErrors.
+.picotel_MAX_CONSECUTIVE_ERRORS <- 5L
+
+# ---------------------------------------------------------------------------
+# Sync sender
+# ---------------------------------------------------------------------------
+
+# .picotel_init_sync_state() — lazily initialise sync-sender state fields.
+.picotel_init_sync_state <- function() {
+  if (!exists("sync_consecutive_failures", envir = .picotel_state, inherits = FALSE)) {
+    .picotel_state$sync_consecutive_failures <- 0L
+    .picotel_state$sync_tripped               <- FALSE
+  }
+}
 
 # .picotel_sync_submit(fn, ...) — execute fn(...) immediately with circuit
-# breaker (trips after 5 consecutive failures, plan D6).
+# breaker (trips permanently after 5 consecutive persistent failures).
+#
+# Returns TRUE on success, transient error, or neutral (disabled).
+# Returns FALSE when the breaker is tripped or on the Nth persistent failure.
+# Mirrors Python _SyncSender.submit() semantics exactly, including return value.
 .picotel_sync_submit <- function(fn, ...) {
-  stop("TODO(WP5): .picotel_sync_submit")
+  .picotel_init_sync_state()
+
+  if (isTRUE(.picotel_state$sync_tripped)) {
+    return(FALSE)
+  }
+
+  # NOTE: <<- inside tryCatch's expression body does NOT update the parent
+  # function's environment in R (tryCatch evaluates exprs in a special context).
+  # We capture a reference to this function's own environment so the tryCatch
+  # body can mutate 'persistent_failure' via $ directly.
+  self               <- environment()
+  persistent_failure <- FALSE
+
+  cls <- tryCatch(
+    {
+      result <- fn(...)
+      if (identical(result, FALSE)) {
+        self$persistent_failure <- TRUE
+      } else {
+        # Success: reset consecutive error counter.
+        .picotel_state$sync_consecutive_failures <- 0L
+      }
+      "ok"
+    },
+    picotel_disabled = function(e) {
+      # Neutral path: neither success nor failure, leave counter unchanged.
+      "disabled"
+    },
+    picotel_config_error = function(e) {
+      .picotel_log(paste("telemetry config error:", conditionMessage(e)))
+      self$persistent_failure <- TRUE
+      "config_error"
+    },
+    error = function(e) {
+      # Transient: logged but not counted toward circuit breaker.
+      .picotel_log(paste("telemetry send error:", conditionMessage(e)))
+      "transient"
+    }
+  )
+
+  # Neutral and transient paths return TRUE without updating counter.
+  if (cls %in% c("disabled", "transient")) {
+    return(TRUE)
+  }
+
+  if (!persistent_failure) {
+    return(TRUE)
+  }
+
+  # Persistent failure path.
+  .picotel_state$sync_consecutive_failures <-
+    .picotel_state$sync_consecutive_failures + 1L
+
+  if (.picotel_state$sync_consecutive_failures >= .picotel_MAX_CONSECUTIVE_ERRORS) {
+    .picotel_state$sync_tripped <- TRUE
+    .picotel_log(
+      sprintf(
+        "telemetry send failed %d times consecutively, further sends are disabled",
+        .picotel_MAX_CONSECUTIVE_ERRORS
+      )
+    )
+    return(FALSE)
+  }
+
+  return(TRUE)
 }
 
-# .picotel_async_submit(fn, ...) — enqueue fn(...) in the curl multi pool;
-# non-blocking (plan D6).  Capped at 256 pending; single error message per
-# overflow episode.
+# ---------------------------------------------------------------------------
+# Async sender
+# ---------------------------------------------------------------------------
+
+# .picotel_init_async_state() — lazily initialise async-sender state fields.
+# Fields maintained in .picotel_state:
+#   async_queue               — list() of pending zero-arg closures (capped 256)
+#   async_pending             — integer count of enqueued-but-unexecuted items
+#   async_consecutive_failures — consecutive persistent failure counter
+#   async_tripped             — TRUE once circuit breaker trips permanently
+#   async_queue_full_warned   — TRUE once overflow warning fired for current
+#                               episode; reset on successful enqueue (mirrors
+#                               Python's _queue_full_warned = False in else)
+.picotel_init_async_state <- function() {
+  if (!exists("async_queue", envir = .picotel_state, inherits = FALSE)) {
+    .picotel_state$async_queue                <- list()
+    .picotel_state$async_pending              <- 0L
+    .picotel_state$async_consecutive_failures <- 0L
+    .picotel_state$async_tripped              <- FALSE
+    .picotel_state$async_queue_full_warned    <- FALSE
+  }
+}
+
+.picotel_ASYNC_MAX_QUEUE <- 256L
+
+# .picotel_async_submit(fn, ...) — enqueue fn(...) as a deferred closure.
+# Non-blocking: submit() NEVER executes fn; it only enqueues and returns.
+# Execution happens exclusively in picotel_flush() or the on-exit finalizer.
+#
+# DEVIATION from Python: Python's _AsyncSender uses a background thread and
+# executes fns immediately.  R is single-threaded — we use a deferral queue
+# instead (plan D6 explicitly allows: "transfers progress only during
+# submit/flush pumps").
+#
+# Queue cap: 256 items.  When full, drops the new item and logs ONE error per
+# overflow episode.  The overflow-warning flag resets on the next SUCCESSFUL
+# enqueue (mirrors Python's queue.put_nowait() else branch).
 .picotel_async_submit <- function(fn, ...) {
-  stop("TODO(WP5): .picotel_async_submit")
+  .picotel_init_async_state()
+
+  if (isTRUE(.picotel_state$async_tripped)) {
+    return(FALSE)
+  }
+
+  # Cap check: drop with a single warning per overflow episode.
+  if (.picotel_state$async_pending >= .picotel_ASYNC_MAX_QUEUE) {
+    if (!isTRUE(.picotel_state$async_queue_full_warned)) {
+      .picotel_log("telemetry send queue full, signals are being dropped")
+      .picotel_state$async_queue_full_warned <- TRUE
+    }
+    return(FALSE)
+  }
+
+  # Capture fn and args NOW so the closure runs with the correct values
+  # even if callers mutate the surrounding environment later.
+  local_fn   <- fn
+  local_args <- list(...)
+  closure    <- function() do.call(local_fn, local_args)
+
+  .picotel_state$async_queue   <- c(.picotel_state$async_queue, list(closure))
+  .picotel_state$async_pending <- .picotel_state$async_pending + 1L
+
+  # Successful enqueue resets the overflow-warning flag so the NEXT episode
+  # can log again (mirrors Python: self._queue_full_warned = False in else).
+  .picotel_state$async_queue_full_warned <- FALSE
+
+  return(TRUE)
 }
 
-# picotel_flush(timeout) — pump the async pool until drained or timeout
-# (seconds).  No-op for the sync sender.
+# .picotel_async_execute_one() — dequeue and execute one closure, applying
+# failure classification and updating async circuit-breaker state.
+# Always decrements async_pending (mirrors Go's defer a.pending.Add(-1)).
+# Returns TRUE when the circuit breaker just tripped (flush should abort queue).
+.picotel_async_execute_one <- function() {
+  if (length(.picotel_state$async_queue) == 0L) {
+    return(FALSE)
+  }
+
+  # Dequeue first item.
+  closure <- .picotel_state$async_queue[[1L]]
+  .picotel_state$async_queue <- .picotel_state$async_queue[-1L]
+
+  # pending is decremented in ALL paths (success, failure, trip-discard) so
+  # flush invariants hold (Go parity: defer a.pending.Add(-1)).
+  on.exit({
+    .picotel_state$async_pending <-
+      max(0L, .picotel_state$async_pending - 1L)
+  }, add = TRUE)
+
+  if (isTRUE(.picotel_state$async_tripped)) {
+    # Post-trip: drain silently; pending decremented by on.exit above.
+    return(FALSE)
+  }
+
+  # Use explicit environment reference to work around tryCatch's special
+  # evaluation context that prevents <<- from updating the parent scope.
+  self               <- environment()
+  persistent_failure <- FALSE
+
+  cls <- tryCatch(
+    {
+      result <- closure()
+      if (identical(result, FALSE)) {
+        self$persistent_failure <- TRUE
+      } else {
+        # Success: reset counter.
+        .picotel_state$async_consecutive_failures <- 0L
+      }
+      "ok"
+    },
+    picotel_disabled = function(e) {
+      # Neutral: leave counter unchanged.
+      "disabled"
+    },
+    picotel_config_error = function(e) {
+      .picotel_log(paste("telemetry config error:", conditionMessage(e)))
+      self$persistent_failure <- TRUE
+      "config_error"
+    },
+    error = function(e) {
+      .picotel_log(paste("telemetry send error:", conditionMessage(e)))
+      "transient"
+    }
+  )
+
+  if (cls %in% c("disabled", "transient")) {
+    return(FALSE)
+  }
+
+  if (!persistent_failure) {
+    return(FALSE)
+  }
+
+  # Persistent failure.
+  .picotel_state$async_consecutive_failures <-
+    .picotel_state$async_consecutive_failures + 1L
+
+  if (.picotel_state$async_consecutive_failures >= .picotel_MAX_CONSECUTIVE_ERRORS) {
+    .picotel_state$async_tripped <- TRUE
+    .picotel_log(
+      sprintf(
+        "telemetry send failed %d times consecutively, further sends are disabled",
+        .picotel_MAX_CONSECUTIVE_ERRORS
+      )
+    )
+    return(TRUE)  # tell flush to abort remaining queue
+  }
+  return(FALSE)
+}
+
+# picotel_flush(timeout) — pump the async deferral queue until drained or
+# timeout seconds elapsed; no-op (returns TRUE) for the sync sender.
+#
+# timeout > 0 : execute closures until queue empty OR elapsed >= timeout.
+#               Returns TRUE if fully drained, FALSE if timed out with work
+#               remaining.  Caveat: a single in-flight closure can overshoot
+#               the deadline (R is single-threaded; no preemption).
+# timeout == 0: report emptiness without executing any work.
+#               Mirrors Go's Flush(0) "single immediate check".
+# timeout < 0 : same as 0 (immediate check, no execution).
+#
+# Post-trip: flush discards the remaining queue and returns TRUE (queue
+# is now empty from the caller's perspective).  pending reaches 0 so
+# any subsequent flush(0) check returns TRUE.
 picotel_flush <- function(timeout = 2) {
-  stop("TODO(WP5): picotel_flush")
+  # If sender_mode has not been set (lazy init not triggered), nothing is
+  # pending — return TRUE immediately.
+  if (!exists("sender_mode", envir = .picotel_state, inherits = FALSE)) {
+    return(TRUE)
+  }
+
+  if (!identical(.picotel_state$sender_mode, "async")) {
+    # Sync sender: nothing is ever deferred.
+    return(TRUE)
+  }
+
+  .picotel_init_async_state()
+
+  # timeout <= 0: immediate emptiness check, no execution.
+  if (timeout <= 0) {
+    return(.picotel_state$async_pending == 0L)
+  }
+
+  deadline <- Sys.time() + timeout
+
+  while (length(.picotel_state$async_queue) > 0L) {
+    # Deadline check before executing next item.
+    if (Sys.time() >= deadline) {
+      return(FALSE)  # timed out with work remaining
+    }
+
+    # Execute one item; TRUE means breaker just tripped.
+    just_tripped <- .picotel_async_execute_one()
+
+    if (just_tripped || isTRUE(.picotel_state$async_tripped)) {
+      # Drain remaining queue silently so pending reaches 0.
+      while (length(.picotel_state$async_queue) > 0L) {
+        .picotel_async_execute_one()
+      }
+      return(TRUE)  # fully drained (discarded post-trip)
+    }
+  }
+
+  return(TRUE)  # queue empty
 }
 
-# .picotel_get_sender() — return the process-wide sender function; decides
-# once per process based on PICOTEL_ASYNC (lazy init cached in .picotel_state).
+# .picotel_register_flush_finalizer() — register a best-effort on-exit hook
+# so that async-queued sends are attempted when the R session exits cleanly.
+# Uses reg.finalizer(..., onexit = TRUE) on .picotel_state.
+#
+# CAVEATS:
+#   - Does NOT fire on SIGKILL, crash, or abnormal exit.
+#   - In parallel::mclapply child processes the finalizer may not fire;
+#     async sends from forked code may be silently lost.  Use sync sender
+#     in forked code.
+#   - Finalizer ordering relative to other on.exit() handlers is not
+#     guaranteed; resources freed by those handlers may already be gone.
+.picotel_register_flush_finalizer <- function() {
+  reg.finalizer(.picotel_state, function(e) {
+    tryCatch(
+      picotel_flush(timeout = 2),
+      error = function(err) invisible(NULL)
+    )
+  }, onexit = TRUE)
+}
+
+# Register the exit finalizer once at source() time.
+.picotel_register_flush_finalizer()
+
+# ---------------------------------------------------------------------------
+# Sender selection
+# ---------------------------------------------------------------------------
+
+# .picotel_get_sender() — return the process-wide sender function, decided
+# once per process at first call and cached in .picotel_state$sender_fn.
+#
+# PICOTEL_ASYNC env-var read: Sys.getenv("PICOTEL_ASYNC") is read DIRECTLY
+# (NOT through .picotel_env()) because PICOTEL_ASYNC does not follow the
+# OTEL_* prefix convention — it is a picotel-specific variable with no
+# "OTEL_" prefix, so .picotel_env() would incorrectly prepend the custom
+# prefix to it.  Python mirrors this: _get_sender() reads
+# os.environ.get("PICOTEL_ASYNC", "").lower() with no prefix remapping.
+# Truthy values: "true" or "1" (case-insensitive) — matches Python exactly.
+#
+# .picotel_reset_state() clears sender_fn, allowing re-selection in tests.
 .picotel_get_sender <- function() {
-  stop("TODO(WP5): .picotel_get_sender")
+  if (exists("sender_fn", envir = .picotel_state, inherits = FALSE)) {
+    return(.picotel_state$sender_fn)
+  }
+
+  async_val <- tolower(trimws(Sys.getenv("PICOTEL_ASYNC", unset = "")))
+  is_async  <- async_val %in% c("true", "1")
+
+  if (is_async) {
+    .picotel_state$sender_mode <- "async"
+    .picotel_state$sender_fn   <- .picotel_async_submit
+  } else {
+    .picotel_state$sender_mode <- "sync"
+    .picotel_state$sender_fn   <- .picotel_sync_submit
+  }
+
+  .picotel_state$sender_fn
 }
 
 
