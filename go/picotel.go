@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -213,39 +214,95 @@ type LogRecord struct {
 // NewSpan creates a new Span with the given traceID and name. The span ID is
 // automatically generated.
 func NewSpan(traceID, name string) *Span {
-	panic("picotel: TODO(WP6)")
+	return &Span{
+		TraceID:    traceID,
+		Name:       name,
+		SpanID:     NewSpanID(),
+		Kind:       SpanKindInternal,
+		Attributes: make(map[string]any),
+	}
 }
 
 // NewSpanFromEnv creates a new Span reading the trace parent from the
 // environment via TRACEPARENT (or its prefixed variant).
 func NewSpanFromEnv(name string) *Span {
-	panic("picotel: TODO(WP6)")
+	s := &Span{
+		Name:       name,
+		SpanID:     NewSpanID(),
+		Kind:       SpanKindInternal,
+		Attributes: make(map[string]any),
+	}
+	traceID, parentSpanID, _, ok := parseTraceparentEnv()
+	if !ok {
+		// Mirror Python's __post_init__: log error, set empty TraceID so span
+		// is dropped at send (validateSpan rejects empty TraceID).
+		pkgLog("TRACEPARENT requested but env var not set or invalid")
+		s.TraceID = ""
+		return s
+	}
+	s.TraceID = traceID
+	if parentSpanID != "" {
+		s.ParentSpanID = parentSpanID
+	}
+	return s
 }
 
 // Start records the span start time (NowNS) and returns the span for chaining.
 func (s *Span) Start() *Span {
-	panic("picotel: TODO(WP6)")
+	if s.StartTimeNS == 0 {
+		s.StartTimeNS = NowNS()
+	}
+	return s
 }
 
 // End records the span end time and submits it via the configured sender.
 func (s *Span) End() {
-	panic("picotel: TODO(WP6)")
+	if s.EndTimeNS == 0 {
+		s.EndTimeNS = NowNS()
+	}
+	if isDisabled() {
+		return
+	}
+	// Resolve endpoint: s.Endpoint if set, else env.
+	endpoint := s.Endpoint
+	// Resolve resource: s.Resource if set, else env.
+	resource := s.Resource
+	if resource == nil {
+		resource = resourceFromEnv()
+	}
+	// Mirror Python's __exit__: only send if resource is resolved.
+	// If resource is nil, silently drop (matches Python "if resource:" guard).
+	if resource == nil {
+		return
+	}
+	// Capture values for the closure.
+	span := s
+	ep := endpoint
+	res := resource
+	scope := s.Scope
+	theSender().submit(func() error {
+		return SendSpans(ep, res, []*Span{span}, scope, 0)
+	})
 }
 
 // Send immediately sends this span to the given OTLP endpoint.
 func (s *Span) Send(endpoint string, resource *Resource, scope *InstrumentationScope, timeout time.Duration) error {
-	panic("picotel: TODO(WP6)")
+	return SendSpans(endpoint, resource, []*Span{s}, scope, timeout)
 }
 
 // NewLogRecord creates a new LogRecord with the given body. SeverityNumber
 // defaults to SeverityInfo.
 func NewLogRecord(body any) *LogRecord {
-	panic("picotel: TODO(WP6)")
+	return &LogRecord{
+		Body:           body,
+		SeverityNumber: SeverityInfo,
+		Attributes:     make(map[string]any),
+	}
 }
 
 // Send immediately sends this log record to the given OTLP endpoint.
 func (l *LogRecord) Send(endpoint string, resource *Resource, scope *InstrumentationScope, timeout time.Duration) error {
-	panic("picotel: TODO(WP6)")
+	return SendLogs(endpoint, resource, []*LogRecord{l}, scope, timeout)
 }
 
 // ============================================================================
@@ -254,12 +311,134 @@ func (l *LogRecord) Send(endpoint string, resource *Resource, scope *Instrumenta
 
 // SendSpans sends a batch of spans to the OTLP /v1/traces endpoint.
 func SendSpans(endpoint string, resource *Resource, spans []*Span, scope *InstrumentationScope, timeout time.Duration) error {
-	panic("picotel: TODO(WP6)")
+	if isDisabled() {
+		return ErrDisabled
+	}
+
+	// Resolve URL.
+	var rawURL string
+	if endpoint == "" {
+		rawURL = endpointFromEnv("traces")
+		if rawURL == "" {
+			return &ConfigError{Msg: "No OTLP endpoint configured." +
+				" Set " + envName("OTEL_EXPORTER_OTLP_ENDPOINT") +
+				" or " + envName("OTEL_SDK_DISABLED") + "=true."}
+		}
+	} else {
+		// Explicit endpoint: always append /v1/traces (strip trailing slashes first).
+		rawURL = strings.TrimRight(endpoint, "/") + "/v1/traces"
+	}
+
+	// Resolve resource.
+	if resource == nil {
+		resource = resourceFromEnv()
+	}
+	if resource == nil {
+		return &ConfigError{Msg: "No OTLP resource configured." +
+			" Set " + envName("OTEL_SERVICE_NAME") +
+			" or " + envName("OTEL_RESOURCE_ATTRIBUTES") + "."}
+	}
+
+	// Validate spans; drop invalid ones individually.
+	validSpans := make([]*Span, 0, len(spans))
+	for _, s := range spans {
+		if err := validateSpan(s); err != nil {
+			pkgLog(err.Error())
+			continue
+		}
+		validSpans = append(validSpans, s)
+	}
+
+	// Build payload: always POST even if all spans were dropped (mirrors Python
+	// behavior — it builds span_dicts = [] and posts anyway).
+	spanMaps := make([]map[string]any, len(validSpans))
+	for i, s := range validSpans {
+		spanMaps[i] = spanToMap(s)
+	}
+
+	scopeSpanDict := map[string]any{"spans": spanMaps}
+	if scope != nil {
+		scopeDict := map[string]any{"name": scope.Name, "version": scope.Version}
+		if len(scope.Attributes) > 0 {
+			scopeDict["attributes"] = attrsToOTLP(scope.Attributes)
+		}
+		scopeSpanDict["scope"] = scopeDict
+	}
+
+	payload := map[string]any{
+		"resourceSpans": []map[string]any{
+			{
+				"resource":   map[string]any{"attributes": attrsToOTLP(resource.Attributes)},
+				"scopeSpans": []map[string]any{scopeSpanDict},
+			},
+		},
+	}
+
+	if err := postJSON(rawURL, payload, "traces", timeout); err != nil {
+		pkgLog("Failed to send spans to %s: %v", rawURL, err)
+		return err
+	}
+	return nil
 }
 
 // SendLogs sends a batch of log records to the OTLP /v1/logs endpoint.
 func SendLogs(endpoint string, resource *Resource, logs []*LogRecord, scope *InstrumentationScope, timeout time.Duration) error {
-	panic("picotel: TODO(WP6)")
+	if isDisabled() {
+		return ErrDisabled
+	}
+
+	// Resolve URL.
+	var rawURL string
+	if endpoint == "" {
+		rawURL = endpointFromEnv("logs")
+		if rawURL == "" {
+			return &ConfigError{Msg: "No OTLP endpoint configured." +
+				" Set " + envName("OTEL_EXPORTER_OTLP_ENDPOINT") +
+				" or " + envName("OTEL_SDK_DISABLED") + "=true."}
+		}
+	} else {
+		rawURL = strings.TrimRight(endpoint, "/") + "/v1/logs"
+	}
+
+	// Resolve resource.
+	if resource == nil {
+		resource = resourceFromEnv()
+	}
+	if resource == nil {
+		return &ConfigError{Msg: "No OTLP resource configured." +
+			" Set " + envName("OTEL_SERVICE_NAME") +
+			" or " + envName("OTEL_RESOURCE_ATTRIBUTES") + "."}
+	}
+
+	// Build log record maps.
+	logMaps := make([]map[string]any, len(logs))
+	for i, l := range logs {
+		logMaps[i] = logToMap(l)
+	}
+
+	scopeLogDict := map[string]any{"logRecords": logMaps}
+	if scope != nil {
+		scopeDict := map[string]any{"name": scope.Name, "version": scope.Version}
+		if len(scope.Attributes) > 0 {
+			scopeDict["attributes"] = attrsToOTLP(scope.Attributes)
+		}
+		scopeLogDict["scope"] = scopeDict
+	}
+
+	payload := map[string]any{
+		"resourceLogs": []map[string]any{
+			{
+				"resource":  map[string]any{"attributes": attrsToOTLP(resource.Attributes)},
+				"scopeLogs": []map[string]any{scopeLogDict},
+			},
+		},
+	}
+
+	if err := postJSON(rawURL, payload, "logs", timeout); err != nil {
+		pkgLog("Failed to send logs to %s: %v", rawURL, err)
+		return err
+	}
+	return nil
 }
 
 // ============================================================================
@@ -290,29 +469,232 @@ var _ slog.Handler = (*OTLPHandler)(nil)
 
 // NewOTLPHandler creates a new OTLPHandler with the given options.
 func NewOTLPHandler(opts *OTLPHandlerOptions) *OTLPHandler {
-	panic("picotel: TODO(WP6)")
+	if opts == nil {
+		return &OTLPHandler{}
+	}
+	// Copy opts so we don't alias the caller's struct (including the Attributes map).
+	copied := *opts
+	if opts.Attributes != nil {
+		m := make(map[string]any, len(opts.Attributes))
+		for k, v := range opts.Attributes {
+			m[k] = v
+		}
+		copied.Attributes = m
+	}
+	return &OTLPHandler{opts: copied}
 }
 
 // Enabled reports whether the handler handles records at the given level.
-func (h *OTLPHandler) Enabled(ctx context.Context, level slog.Level) bool {
-	panic("picotel: TODO(WP6)")
+func (h *OTLPHandler) Enabled(_ context.Context, level slog.Level) bool {
+	if isDisabled() {
+		return false
+	}
+	if h.opts.Level == nil {
+		// nil Level → handle everything (mirrors Python NOTSET).
+		return true
+	}
+	return level >= h.opts.Level.Level()
 }
 
 // Handle exports the slog.Record to the OTLP collector.
-func (h *OTLPHandler) Handle(ctx context.Context, rec slog.Record) error {
-	panic("picotel: TODO(WP6)")
+func (h *OTLPHandler) Handle(_ context.Context, rec slog.Record) error {
+	// Map slog level to OTLP severity, mirroring Python's _level_to_severity:
+	//   <=DEBUG  → SeverityDebug
+	//   <=INFO   → SeverityInfo
+	//   <=WARN   → SeverityWarn
+	//   <=ERROR  → SeverityError
+	//   else     → SeverityFatal
+	var severity Severity
+	switch {
+	case rec.Level <= slog.LevelDebug:
+		severity = SeverityDebug
+	case rec.Level <= slog.LevelInfo:
+		severity = SeverityInfo
+	case rec.Level <= slog.LevelWarn:
+		severity = SeverityWarn
+	case rec.Level <= slog.LevelError:
+		severity = SeverityError
+	default:
+		severity = SeverityFatal
+	}
+
+	// Build attributes map:
+	// 1. handler-level opts.Attributes first
+	// 2. WithAttrs-accumulated attrs (with group prefix applied)
+	// 3. record attrs (record wins)
+	// This matches Python's attribute precedence: handler.extra["attributes"] →
+	// record_extra["attributes"] (record wins on conflict).
+	attrs := make(map[string]any)
+
+	// Layer 1: handler-level attributes from opts.Attributes.
+	for k, v := range h.opts.Attributes {
+		attrs[k] = v
+	}
+
+	// Layer 2: WithAttrs-accumulated attrs (flattened with group prefix).
+	for _, a := range h.attrs {
+		hdFlattenAttr(attrs, h.groupPrefix, a)
+	}
+
+	// Layer 3: record attrs (override previous layers).
+	rec.Attrs(func(a slog.Attr) bool {
+		hdFlattenAttr(attrs, h.groupPrefix, a)
+		return true
+	})
+
+	// Extract trace/span correlation from attributes — record-level attrs
+	// override handler-level (opts.TraceID/SpanID are the base defaults).
+	traceID := h.opts.TraceID
+	spanID := h.opts.SpanID
+
+	// Check handler-level opts.Attributes for trace_id/span_id.
+	if v, ok := h.opts.Attributes["trace_id"]; ok {
+		if s, ok := v.(string); ok {
+			traceID = s
+		}
+	}
+	if v, ok := h.opts.Attributes["span_id"]; ok {
+		if s, ok := v.(string); ok {
+			spanID = s
+		}
+	}
+
+	// WithAttrs-accumulated attrs may also carry trace_id/span_id.
+	for _, a := range h.attrs {
+		hdExtractTraceSpan(a, h.groupPrefix, &traceID, &spanID)
+	}
+
+	// Record attrs override everything.
+	rec.Attrs(func(a slog.Attr) bool {
+		hdExtractTraceSpan(a, h.groupPrefix, &traceID, &spanID)
+		return true
+	})
+
+	// Remove trace_id/span_id from the attributes map — they go into
+	// LogRecord fields, not OTLP attributes (mirror Python's extract behavior).
+	delete(attrs, "trace_id")
+	delete(attrs, "span_id")
+
+	// Source attributes: unless OmitSource, resolve PC.
+	if !h.opts.OmitSource && rec.PC != 0 {
+		frames := runtime.CallersFrames([]uintptr{rec.PC})
+		f, _ := frames.Next()
+		if f.File != "" {
+			attrs["code.filepath"] = f.File
+			attrs["code.lineno"] = f.Line
+			attrs["code.function"] = f.Function
+		}
+	}
+
+	// Timestamp: zero time → leave TimestampNS as 0 so logToMap defaults to now.
+	var tsNS int64
+	if !rec.Time.IsZero() {
+		tsNS = rec.Time.UnixNano()
+	}
+
+	log := &LogRecord{
+		Body:           rec.Message,
+		TimestampNS:    tsNS,
+		TraceID:        traceID,
+		SpanID:         spanID,
+		SeverityNumber: severity,
+		SeverityText:   rec.Level.String(),
+		Attributes:     attrs,
+	}
+
+	// Resolve endpoint and resource; submit via sender.
+	endpoint := h.opts.Endpoint
+	resource := h.opts.Resource
+	if resource == nil {
+		resource = resourceFromEnv()
+	}
+	// Mirror Python's emit: only send if resource is resolved.
+	// If resource is nil, silently drop (no log, no error).
+	if resource == nil {
+		return nil
+	}
+	scope := h.opts.Scope
+	theSender().submit(func() error {
+		return SendLogs(endpoint, resource, []*LogRecord{log}, scope, 0)
+	})
+
+	// ALWAYS return nil: errors must never propagate to the logging caller.
+	return nil
+}
+
+// hdFlattenAttr resolves a slog.Attr into attrs under the given group prefix.
+// Groups are expanded into dotted key prefixes.
+func hdFlattenAttr(attrs map[string]any, prefix string, a slog.Attr) {
+	a.Value = a.Value.Resolve()
+	if a.Value.Kind() == slog.KindGroup {
+		groupKey := a.Key
+		var newPrefix string
+		if prefix != "" {
+			newPrefix = prefix + "." + groupKey
+		} else {
+			newPrefix = groupKey
+		}
+		for _, ga := range a.Value.Group() {
+			hdFlattenAttr(attrs, newPrefix, ga)
+		}
+		return
+	}
+	key := a.Key
+	if prefix != "" {
+		key = prefix + "." + key
+	}
+	attrs[key] = a.Value.Any()
+}
+
+// hdExtractTraceSpan checks if attr (at top-level, no group prefix match needed)
+// carries trace_id or span_id and updates the pointers if so.
+func hdExtractTraceSpan(a slog.Attr, prefix string, traceID, spanID *string) {
+	a.Value = a.Value.Resolve()
+	if a.Value.Kind() == slog.KindGroup {
+		// trace_id/span_id inside a group are not extracted.
+		return
+	}
+	key := a.Key
+	if prefix != "" {
+		key = prefix + "." + key
+	}
+	switch key {
+	case "trace_id":
+		if s, ok := a.Value.Any().(string); ok {
+			*traceID = s
+		} else {
+			*traceID = a.Value.String()
+		}
+	case "span_id":
+		if s, ok := a.Value.Any().(string); ok {
+			*spanID = s
+		} else {
+			*spanID = a.Value.String()
+		}
+	}
 }
 
 // WithAttrs returns a new handler whose attributes consist of both the
 // receiver's attributes and the given attrs.
 func (h *OTLPHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	panic("picotel: TODO(WP6)")
+	// Immutable copy per slog contract.
+	h2 := *h
+	h2.attrs = make([]slog.Attr, len(h.attrs)+len(attrs))
+	copy(h2.attrs, h.attrs)
+	copy(h2.attrs[len(h.attrs):], attrs)
+	return &h2
 }
 
 // WithGroup returns a new handler with the given group prepended to the
 // attribute key prefix.
 func (h *OTLPHandler) WithGroup(name string) slog.Handler {
-	panic("picotel: TODO(WP6)")
+	h2 := *h
+	if h2.groupPrefix != "" {
+		h2.groupPrefix = h2.groupPrefix + "." + name
+	} else {
+		h2.groupPrefix = name
+	}
+	return &h2
 }
 
 // ============================================================================
@@ -1364,7 +1746,3 @@ func pkgLog(format string, args ...any) {
 	pkgLoggerMu.Unlock()
 	l.Printf(format, args...)
 }
-
-// compile-time import usage guards (prevent "imported and not used" errors
-// for packages that are only referenced in stub/implemented functions).
-var _ = fmt.Sprintf
