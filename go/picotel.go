@@ -11,14 +11,19 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -653,28 +658,293 @@ func postJSON(url string, payload any, signal string, timeout time.Duration) err
 // ============================================================================
 
 // toOTLPValue converts a Go value to the typed OTLP attribute map format.
+//
+// Type dispatch order mirrors Python's _to_otlp_value():
+//
+//	nil → {}
+//	bool → boolValue (before int, because Go type switch is exact)
+//	signed ints / uint..uint32 → intValue as decimal string
+//	uint64 / uintptr → intValue via FormatUint (no narrowing cast)
+//	float32 / float64 → doubleValue (NaN/±Inf become strings per proto3 JSON)
+//	string → stringValue
+//	[]byte → bytesValue (std base64)
+//	[]any → arrayValue (recursive)
+//	map[string]any → kvlistValue (keys sorted)
+//	reflect fallback for typed slices/arrays and string-keyed maps
+//	anything else → stringValue via fmt.Sprintf("%v", v)
 func toOTLPValue(v any) map[string]any {
-	panic("picotel: TODO(WP3)")
+	if v == nil {
+		return map[string]any{}
+	}
+	switch val := v.(type) {
+	case bool:
+		return map[string]any{"boolValue": val}
+	case int:
+		return map[string]any{"intValue": strconv.FormatInt(int64(val), 10)}
+	case int8:
+		return map[string]any{"intValue": strconv.FormatInt(int64(val), 10)}
+	case int16:
+		return map[string]any{"intValue": strconv.FormatInt(int64(val), 10)}
+	case int32:
+		return map[string]any{"intValue": strconv.FormatInt(int64(val), 10)}
+	case int64:
+		return map[string]any{"intValue": strconv.FormatInt(val, 10)}
+	case uint:
+		return map[string]any{"intValue": strconv.FormatUint(uint64(val), 10)}
+	case uint8:
+		// uint8 == byte; but []byte is caught before []any via separate case.
+		// A bare uint8 scalar is treated as an integer, matching Python int.
+		return map[string]any{"intValue": strconv.FormatUint(uint64(val), 10)}
+	case uint16:
+		return map[string]any{"intValue": strconv.FormatUint(uint64(val), 10)}
+	case uint32:
+		return map[string]any{"intValue": strconv.FormatUint(uint64(val), 10)}
+	case uint64:
+		return map[string]any{"intValue": strconv.FormatUint(val, 10)}
+	case uintptr:
+		return map[string]any{"intValue": strconv.FormatUint(uint64(val), 10)}
+	case float32:
+		return encFloatValue(float64(val))
+	case float64:
+		return encFloatValue(val)
+	case string:
+		return map[string]any{"stringValue": val}
+	case []byte:
+		return map[string]any{"bytesValue": base64.StdEncoding.EncodeToString(val)}
+	case []any:
+		return encAnySliceValue(val)
+	case map[string]any:
+		return encStringMapValue(val)
+	default:
+		// Reflection fallback: handle typed slices/arrays and string-keyed maps
+		// so []string, []int, map[string]string etc. encode structurally.
+		rv := reflect.ValueOf(v)
+		switch rv.Kind() {
+		case reflect.Slice, reflect.Array:
+			vals := make([]map[string]any, rv.Len())
+			for i := 0; i < rv.Len(); i++ {
+				vals[i] = toOTLPValue(rv.Index(i).Interface())
+			}
+			return map[string]any{"arrayValue": map[string]any{"values": vals}}
+		case reflect.Map:
+			if rv.Type().Key().Kind() == reflect.String {
+				keys := make([]string, 0, rv.Len())
+				for _, k := range rv.MapKeys() {
+					keys = append(keys, k.String())
+				}
+				sort.Strings(keys)
+				pairs := make([]map[string]any, 0, len(keys))
+				for _, k := range keys {
+					pairs = append(pairs, map[string]any{
+						"key":   k,
+						"value": toOTLPValue(rv.MapIndex(reflect.ValueOf(k)).Interface()),
+					})
+				}
+				return map[string]any{"kvlistValue": map[string]any{"values": pairs}}
+			}
+		}
+		return map[string]any{"stringValue": fmt.Sprintf("%v", v)}
+	}
+}
+
+// encFloatValue encodes a float64 to the OTLP doubleValue format.
+// NaN and ±Inf are represented as strings per proto3 JSON encoding rules,
+// since json.Marshal rejects raw non-finite floats.
+func encFloatValue(f float64) map[string]any {
+	switch {
+	case math.IsNaN(f):
+		return map[string]any{"doubleValue": "NaN"}
+	case math.IsInf(f, 1):
+		return map[string]any{"doubleValue": "Infinity"}
+	case math.IsInf(f, -1):
+		return map[string]any{"doubleValue": "-Infinity"}
+	default:
+		return map[string]any{"doubleValue": f}
+	}
+}
+
+// encAnySliceValue encodes a []any to the OTLP arrayValue format.
+func encAnySliceValue(vals []any) map[string]any {
+	encoded := make([]map[string]any, len(vals))
+	for i, item := range vals {
+		encoded[i] = toOTLPValue(item)
+	}
+	return map[string]any{"arrayValue": map[string]any{"values": encoded}}
+}
+
+// encStringMapValue encodes a map[string]any to the OTLP kvlistValue format.
+// Keys are sorted for deterministic output (Go maps are unordered; Python dict
+// insertion order is not preserved in the Go port — sorted is our deviation).
+func encStringMapValue(m map[string]any) map[string]any {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	pairs := make([]map[string]any, 0, len(keys))
+	for _, k := range keys {
+		pairs = append(pairs, map[string]any{
+			"key":   k,
+			"value": toOTLPValue(m[k]),
+		})
+	}
+	return map[string]any{"kvlistValue": map[string]any{"values": pairs}}
 }
 
 // attrsToOTLP converts an attribute map to a slice of OTLP key-value maps.
+// nil attributes map and nil values are skipped (matching Python's _attributes_to_otlp).
+// Keys are sorted for deterministic output.
 func attrsToOTLP(attrs map[string]any) []map[string]any {
-	panic("picotel: TODO(WP3)")
+	if len(attrs) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	result := make([]map[string]any, 0, len(keys))
+	for _, k := range keys {
+		v := attrs[k]
+		if v == nil {
+			continue // Python skips None values at the top level
+		}
+		result = append(result, map[string]any{
+			"key":   k,
+			"value": toOTLPValue(v),
+		})
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 // spanToMap serialises a Span to the OTLP JSON dict format.
+// Ports Python's _span_to_dict() exactly, including omission rules.
 func spanToMap(s *Span) map[string]any {
-	panic("picotel: TODO(WP3)")
+	result := map[string]any{
+		"traceId":           s.TraceID,
+		"spanId":            s.SpanID,
+		"name":              s.Name,
+		"kind":              int(s.Kind),
+		"startTimeUnixNano": strconv.FormatInt(s.StartTimeNS, 10),
+		"endTimeUnixNano":   strconv.FormatInt(s.EndTimeNS, 10),
+	}
+
+	if s.ParentSpanID != "" {
+		result["parentSpanId"] = s.ParentSpanID
+	}
+
+	if attrs := attrsToOTLP(s.Attributes); len(attrs) > 0 {
+		result["attributes"] = attrs
+	}
+
+	if len(s.Events) > 0 {
+		events := make([]map[string]any, len(s.Events))
+		for i, ev := range s.Events {
+			e := map[string]any{
+				"name":         ev.Name,
+				"timeUnixNano": strconv.FormatInt(ev.TimestampNS, 10),
+			}
+			if attrs := attrsToOTLP(ev.Attributes); len(attrs) > 0 {
+				e["attributes"] = attrs
+			}
+			events[i] = e
+		}
+		result["events"] = events
+	}
+
+	if len(s.Links) > 0 {
+		links := make([]map[string]any, len(s.Links))
+		for i, lk := range s.Links {
+			l := map[string]any{
+				"traceId": lk.TraceID,
+				"spanId":  lk.SpanID,
+			}
+			if attrs := attrsToOTLP(lk.Attributes); len(attrs) > 0 {
+				l["attributes"] = attrs
+			}
+			links[i] = l
+		}
+		result["links"] = links
+	}
+
+	// Include status only when set and not UNSET (mirrors Python's None / UNSET check)
+	if s.Status != StatusUnset {
+		result["status"] = map[string]any{"code": int(s.Status)}
+	}
+
+	return result
 }
 
 // logToMap serialises a LogRecord to the OTLP JSON dict format.
+// Ports Python's _log_to_dict() exactly, including timestamp defaulting and
+// omission rules for optional fields.
 func logToMap(l *LogRecord) map[string]any {
-	panic("picotel: TODO(WP3)")
+	// Use current time when timestamps are zero, mirroring Python's:
+	//   str(log.timestamp_ns if log.timestamp_ns else now_ns())
+	ts := l.TimestampNS
+	if ts == 0 {
+		ts = NowNS()
+	}
+	obs := l.ObservedTimestampNS
+	if obs == 0 {
+		obs = NowNS()
+	}
+
+	result := map[string]any{
+		"timeUnixNano":         strconv.FormatInt(ts, 10),
+		"observedTimeUnixNano": strconv.FormatInt(obs, 10),
+		"severityNumber":       int(l.SeverityNumber),
+		"body":                 toOTLPValue(l.Body),
+	}
+
+	if l.SeverityText != "" {
+		result["severityText"] = l.SeverityText
+	}
+
+	if attrs := attrsToOTLP(l.Attributes); len(attrs) > 0 {
+		result["attributes"] = attrs
+	}
+
+	if l.TraceID != "" {
+		result["traceId"] = l.TraceID
+	}
+
+	if l.SpanID != "" {
+		result["spanId"] = l.SpanID
+	}
+
+	if l.TraceFlags != 0 {
+		result["flags"] = int(l.TraceFlags)
+	}
+
+	return result
 }
 
 // validateSpan checks that a Span has the required fields set.
+// Ports the per-span validation Python performs in send_spans via span._validate():
+//   - trace_id must be non-empty
+//   - start_time_ns must be set (not None/zero in Python; Go uses zero-value int64)
+//   - end_time_ns must be set (not None/zero in Python; Go uses zero-value int64)
+//
+// Note: Python uses None (not 0) as the unset sentinel for times. In Go the
+// zero value int64(0) is our sentinel, matching the Python dataclass defaults
+// which use None and check "is None". We treat 0 as "not set" consistent with
+// how LogRecord.TimestampNS defaults to 0 (and gets replaced by NowNS).
 func validateSpan(s *Span) error {
-	panic("picotel: TODO(WP3)")
+	if s.TraceID == "" {
+		return &ConfigError{Msg: "Span invalid: trace_id is empty"}
+	}
+	if s.StartTimeNS == 0 {
+		return &ConfigError{Msg: "Span invalid: start_time_ns is not set"}
+	}
+	if s.EndTimeNS == 0 {
+		return &ConfigError{Msg: "Span invalid: end_time_ns is not set"}
+	}
+	return nil
 }
 
 // ============================================================================
