@@ -321,9 +321,34 @@ func (h *OTLPHandler) WithGroup(name string) slog.Handler {
 
 // Flush waits for all queued telemetry to be sent, up to the given timeout.
 // Returns true if the queue drained within the timeout; false otherwise.
-// Has no effect for the synchronous sender.
+//
+// For asyncSender: polls pending.Load()==0 every 5ms until the deadline.
+// Returns true if drained, false if the timeout elapses first.
+// For timeout<=0: a single immediate check is performed (no waiting).
+//
+// For syncSender (or any non-async sender): always returns true immediately,
+// since all work is executed synchronously on the calling goroutine.
 func Flush(timeout time.Duration) bool {
-	panic("picotel: TODO(WP5)")
+	s := theSender()
+	a, ok := s.(*asyncSender)
+	if !ok {
+		// Sync sender: no queued work, always immediately complete.
+		return true
+	}
+	if timeout <= 0 {
+		// Single immediate check; no waiting.
+		return a.pending.Load() == 0
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if a.pending.Load() == 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // ============================================================================
@@ -1116,9 +1141,73 @@ type syncSender struct {
 	tripped           bool
 }
 
-// submit executes fn immediately on the calling goroutine. (WP5)
+// submit executes fn immediately on the calling goroutine.
+//
+// Lock discipline: the mutex is held only for reading/writing circuit-breaker
+// state. fn itself is executed outside the lock. This matches Python's
+// _SyncSender, which has no locking at all (relying on the GIL + simple
+// field assignments). In Go, holding a mutex across a potentially 2-second
+// HTTP call would serialize all concurrent callers — defeating the purpose
+// of a sync sender that might be called from multiple goroutines. The tradeoff
+// is a tiny window between "check tripped" and "run fn" during which a trip
+// from another goroutine is unobserved; this is acceptable because the breaker
+// is permanent — once tripped, it stays tripped.
+//
+// Return value mirrors Python _SyncSender.submit():
+//   - true  when fn ran and did not return a persistent-failure error
+//   - false when tripped, or when fn returns an error (including on the trip itself)
 func (s *syncSender) submit(fn func() error) bool {
-	panic("picotel: TODO(WP5)")
+	s.mu.Lock()
+	if s.tripped {
+		s.mu.Unlock()
+		return false
+	}
+	s.mu.Unlock()
+
+	// Execute fn outside the lock so concurrent callers are not serialized.
+	var persistentFailure bool
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Transient — panic in fn is equivalent to Python's "unexpected
+				// exception" path. Log it but do not count toward the breaker.
+				pkgLog("telemetry send panic: %v", r)
+			}
+		}()
+		err := fn()
+		if err == nil {
+			// Success: reset counter (mirror Python's else branch).
+			s.mu.Lock()
+			s.consecutiveErrors = 0
+			s.mu.Unlock()
+			return
+		}
+		if errors.Is(err, ErrDisabled) {
+			// Neutral: disabled sends never count toward nor reset the breaker.
+			return
+		}
+		// Any other error (including *ConfigError) is a persistent failure.
+		// Log ConfigErrors the same way Python does.
+		var cfgErr *ConfigError
+		if errors.As(err, &cfgErr) {
+			pkgLog("telemetry config error: %s", cfgErr.Msg)
+		}
+		persistentFailure = true
+	}()
+
+	if !persistentFailure {
+		return true
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.consecutiveErrors++
+	if s.consecutiveErrors >= maxConsecutiveErrors {
+		s.tripped = true
+		pkgLog("telemetry send failed %d times consecutively, further sends are disabled", maxConsecutiveErrors)
+		return false
+	}
+	return true
 }
 
 // asyncSender dispatches submitted functions to a background worker goroutine
@@ -1132,14 +1221,93 @@ type asyncSender struct {
 	consecutiveErrors int // worker-private; no sync needed (single writer)
 }
 
-// submit enqueues fn for background execution. (WP5)
+// submit enqueues fn for background execution.
+//
+// If the circuit breaker has tripped, returns false immediately without
+// touching the channel. Otherwise starts the worker goroutine once via
+// sync.Once, then attempts a non-blocking send into the channel. On overflow,
+// logs exactly one warning per episode (the flag resets on the next successful
+// enqueue — mirroring Python's _queue_full_warned pattern exactly).
 func (a *asyncSender) submit(fn func() error) bool {
-	panic("picotel: TODO(WP5)")
+	if a.tripped.Load() {
+		return false
+	}
+	// Start the worker goroutine exactly once, lazily.
+	a.startWorker.Do(func() { go a.worker() })
+
+	select {
+	case a.ch <- fn:
+		a.pending.Add(1)
+		// Reset the queue-full warn flag so the next overflow episode logs again.
+		a.queueFullWarned.Store(false)
+		return true
+	default:
+		// Channel full — log once per overflow episode.
+		if a.queueFullWarned.CompareAndSwap(false, true) {
+			pkgLogger.Printf("telemetry send queue full, signals are being dropped")
+		}
+		return false
+	}
 }
 
-// worker is the background goroutine that drains the asyncSender channel. (WP5)
+// worker is the background goroutine that drains the asyncSender channel.
+//
+// For each fn received:
+//   - If tripped: discard silently but still decrement pending so Flush can
+//     unblock. The worker keeps running to drain remaining queue items.
+//   - Otherwise: run fn with panic recovery, apply the failure classification,
+//     and decrement pending in all paths.
+//
+// consecutiveErrors is worker-private (single writer) — no locking needed.
 func (a *asyncSender) worker() {
-	panic("picotel: TODO(WP5)")
+	for fn := range a.ch {
+		// We always decrement pending exactly once per fn, regardless of path.
+		// Using an inline closure lets us use defer for the decrement.
+		func() {
+			defer a.pending.Add(-1)
+
+			if a.tripped.Load() {
+				// Post-trip: drain silently so pending reaches 0 and Flush unblocks.
+				return
+			}
+
+			var persistentFailure bool
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						// Transient: mirrors Python's "unexpected exception" path.
+						// Panics are logged but do NOT count toward the breaker.
+						pkgLog("telemetry send panic: %v", r)
+					}
+				}()
+
+				err := fn()
+				if err == nil {
+					// Success: reset consecutive-error counter.
+					a.consecutiveErrors = 0
+					return
+				}
+				if errors.Is(err, ErrDisabled) {
+					// Neutral: disabled sends neither count nor reset the breaker.
+					return
+				}
+				// Persistent failure (includes *ConfigError).
+				var cfgErr *ConfigError
+				if errors.As(err, &cfgErr) {
+					pkgLog("telemetry config error: %s", cfgErr.Msg)
+				}
+				persistentFailure = true
+			}()
+
+			if persistentFailure {
+				a.consecutiveErrors++
+				if a.consecutiveErrors >= maxConsecutiveErrors {
+					a.tripped.Store(true)
+					pkgLog("telemetry send failed %d times consecutively, further sends are disabled", maxConsecutiveErrors)
+				}
+			}
+		}()
+	}
 }
 
 var (
@@ -1180,8 +1348,22 @@ func resetSender() {
 // pkgLogger is the package-internal logger. It is detached from the standard
 // library default logger so that picotel errors (e.g. network failures) do not
 // feed back through an OTLPHandler attached to the default logger, which would
-// create an infinite loop of failing sends. Tests may swap this out.
-var pkgLogger = log.New(os.Stderr, "picotel: ", log.LstdFlags)
+// create an infinite loop of failing sends. Tests may swap this out via
+// pkgLoggerMu + pkgLogger under the lock.
+var (
+	pkgLoggerMu sync.Mutex
+	pkgLogger   = log.New(os.Stderr, "picotel: ", log.LstdFlags)
+)
+
+// pkgLog calls Printf on the current pkgLogger under pkgLoggerMu.
+// All internal logging must go through this function so that test swaps
+// of pkgLogger are race-free.
+func pkgLog(format string, args ...any) {
+	pkgLoggerMu.Lock()
+	l := pkgLogger
+	pkgLoggerMu.Unlock()
+	l.Printf(format, args...)
+}
 
 // compile-time import usage guards (prevent "imported and not used" errors
 // for packages that are only referenced in stub/implemented functions).
