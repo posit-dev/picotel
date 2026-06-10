@@ -1483,9 +1483,13 @@ picotel_resource <- function(attributes) {
   structure(list(attributes = attributes), class = "picotel_resource")
 }
 
-# picotel_scope(name, version, attributes) — create an InstrumentationScope.
+# picotel_scope(name, version, attributes) — create an InstrumentationScope
+# (mirrors Python's InstrumentationScope dataclass).
 picotel_scope <- function(name, version = "", attributes = NULL) {
-  stop("TODO(WP6): picotel_scope")
+  structure(
+    list(name = name, version = version, attributes = attributes),
+    class = "picotel_scope"
+  )
 }
 
 
@@ -1514,7 +1518,54 @@ picotel_span <- function(
   resource      = NULL,
   scope         = NULL
 ) {
-  stop("TODO(WP6): picotel_span")
+  # Build an environment-backed object (plan D3) so callers can mutate
+  # span$attributes etc. inside with_span().
+  span <- new.env(parent = emptyenv())
+
+  # TRACEPARENT sentinel resolution — mirrors Python Span.__post_init__:
+  # If trace_id is TRACEPARENT, call .picotel_parse_traceparent(). On
+  # success, set trace_id + parent_span_id (only if parent_span_id is "").
+  # On failure, log an error and set trace_id to "".
+  if (identical(trace_id, TRACEPARENT)) {
+    if (!.picotel_is_disabled()) {
+      tp <- .picotel_parse_traceparent()
+      if (is.null(tp)) {
+        .picotel_log("TRACEPARENT requested but env var not set or invalid")
+        trace_id <- ""
+      } else {
+        trace_id <- tp$trace_id
+        # Only fill parent_span_id when it is not explicitly set (default "").
+        if (!nchar(parent_span_id)) {
+          parent_span_id <- tp$parent_id
+        }
+      }
+    } else {
+      # Disabled: leave trace_id as TRACEPARENT would cause encode errors;
+      # resolve to "" (same as Python's early-return path which leaves
+      # trace_id as TRACEPARENT sentinel — but since we never encode/send
+      # when disabled this is safe; using "" is more defensive).
+      trace_id <- ""
+    }
+  }
+
+  span$trace_id       <- trace_id
+  span$name           <- name
+  span$span_id        <- span_id
+  span$parent_span_id <- parent_span_id
+  span$kind           <- kind
+  span$start_time_ns  <- start_time_ns
+  span$end_time_ns    <- end_time_ns
+  # Ensure attributes/events/links are always non-NULL lists.
+  span$attributes     <- if (is.null(attributes)) list() else attributes
+  span$events         <- if (is.null(events))     list() else events
+  span$links          <- if (is.null(links))      list() else links
+  span$status         <- status
+  span$endpoint       <- endpoint
+  span$resource       <- resource
+  span$scope          <- scope
+
+  class(span) <- "picotel_span"
+  span
 }
 
 # picotel_log_record(body, ...) — create a new log record (environment-backed,
@@ -1530,7 +1581,43 @@ picotel_log_record <- function(
   severity_text         = "",
   attributes            = list()
 ) {
-  stop("TODO(WP6): picotel_log_record")
+  # Build an environment-backed object (plan D3).
+  log <- new.env(parent = emptyenv())
+
+  # TRACEPARENT sentinel resolution — mirrors Python LogRecord.__post_init__:
+  # Same logic as picotel_span: sentinel → parse → on success set trace_id
+  # and span_id (only if span_id is ""); on failure log + set trace_id to "".
+  if (identical(trace_id, TRACEPARENT)) {
+    if (!.picotel_is_disabled()) {
+      tp <- .picotel_parse_traceparent()
+      if (is.null(tp)) {
+        .picotel_log("TRACEPARENT requested but env var not set or invalid")
+        trace_id <- ""
+      } else {
+        trace_id <- tp$trace_id
+        # Only fill span_id when it is not explicitly set (default "").
+        if (!nchar(span_id)) {
+          span_id <- tp$parent_id
+        }
+      }
+    } else {
+      trace_id <- ""
+    }
+  }
+
+  log$body                  <- body
+  log$timestamp_ns          <- timestamp_ns
+  log$observed_timestamp_ns <- observed_timestamp_ns
+  log$trace_id              <- trace_id
+  log$span_id               <- span_id
+  log$trace_flags           <- trace_flags
+  log$severity_number       <- severity_number
+  log$severity_text         <- severity_text
+  # Ensure attributes is always a non-NULL list.
+  log$attributes            <- if (is.null(attributes)) list() else attributes
+
+  class(log) <- "picotel_log_record"
+  log
 }
 
 
@@ -1568,7 +1655,64 @@ with_span <- function(
   scope         = NULL,
   f
 ) {
-  stop("TODO(WP6): with_span")
+  # Construct the span (TRACEPARENT sentinel resolved inside picotel_span).
+  span <- picotel_span(trace_id = trace_id, name = name, ...,
+                       endpoint = endpoint, resource = resource, scope = scope)
+
+  # Mirror Python Span.__enter__: set start_time_ns if NULL.
+  if (is.null(span$start_time_ns)) {
+    span$start_time_ns <- now_ns()
+  }
+
+  # Execute f(span), capturing result and any error.
+  user_error  <- NULL
+  user_result <- tryCatch(
+    f(span),
+    error = function(e) {
+      user_error <<- e
+      NULL
+    }
+  )
+
+  # Mirror Python Span.__exit__: set end_time_ns if NULL, then send.
+  # Both normal-exit and error-exit paths reach here — Python __exit__ does
+  # the same (it is always called, regardless of exception).
+  if (is.null(span$end_time_ns)) {
+    span$end_time_ns <- now_ns()
+  }
+
+  # Submit the span — but only when not disabled and resource is resolvable.
+  # Python __exit__:
+  #   endpoint = self.endpoint or None          (empty string → None)
+  #   resource = self.resource or _get_resource_from_env()
+  #   if resource: _sender.submit(send_spans, ...)
+  #   (silently drops when resource is still None)
+  # NEVER raises from the send path.
+  if (!.picotel_is_disabled()) {
+    send_endpoint <- if (nchar(span$endpoint) > 0L) span$endpoint else NULL
+    send_resource <- span$resource
+    if (is.null(send_resource)) {
+      send_resource <- .picotel_resource_from_env()
+    }
+    if (!is.null(send_resource)) {
+      tryCatch(
+        {
+          sender <- .picotel_get_sender()
+          sender(send_spans, send_endpoint, send_resource, list(span), span$scope)
+        },
+        error = function(e) invisible(NULL)  # swallow send-path errors
+      )
+    }
+  }
+
+  # Rethrow the user's error AFTER the exit work — mirrors Python context-manager
+  # semantics: __exit__ always runs, then the original exception propagates.
+  if (!is.null(user_error)) {
+    stop(user_error)
+  }
+
+  # Return f's value invisibly (R idiom for side-effectful wrappers).
+  invisible(user_result)
 }
 
 
@@ -1579,6 +1723,18 @@ with_span <- function(
 # span_send(span, ...) — send a single span; silently returns FALSE when
 # endpoint/resource is unconfigured (only batch senders raise config errors,
 # plan WP6).
+#
+# Mirrors Python Span.send():
+#   - endpoint NULL → .picotel_endpoint("traces")  [for existence check]
+#   - resource NULL → .picotel_resource_from_env()
+#   - either still NULL → warn + return FALSE (no raise)
+#   - else → send_spans(endpoint, resource, list(span), scope, timeout)
+#
+# R NOTE: When endpoint comes from env we pass NULL to send_spans so that
+# send_spans resolves it via .picotel_endpoint() (which already appends
+# /v1/traces).  Passing the already-resolved URL would cause a double-append
+# (/v1/traces/v1/traces).  An explicit endpoint string is passed through as-is
+# (send_spans appends /v1/traces once, which is correct for explicit values).
 span_send <- function(
   span,
   endpoint = NULL,
@@ -1586,10 +1742,33 @@ span_send <- function(
   scope    = NULL,
   timeout  = 2
 ) {
-  stop("TODO(WP6): span_send")
+  # Track whether endpoint came from env vs. was explicitly supplied.
+  endpoint_from_env <- is.null(endpoint)
+  if (endpoint_from_env) {
+    ep_check <- .picotel_endpoint("traces")
+  } else {
+    ep_check <- endpoint
+  }
+  if (is.null(resource)) {
+    resource <- .picotel_resource_from_env()
+  }
+  if (is.null(ep_check) || is.null(resource)) {
+    .picotel_log("span not sent, missing endpoint or resource")
+    return(FALSE)
+  }
+  # Pass NULL when env-resolved so send_spans resolves cleanly (avoids
+  # double-appending /v1/traces); pass explicit endpoint through as-is.
+  send_ep <- if (endpoint_from_env) NULL else endpoint
+  send_spans(send_ep, resource, list(span), scope, timeout)
 }
 
 # log_send(log, ...) — send a single log record; same skip semantics as span_send.
+#
+# Mirrors Python LogRecord.send():
+#   - endpoint NULL → .picotel_endpoint("logs")  [for existence check]
+#   - resource NULL → .picotel_resource_from_env()
+#   - either still NULL → warn + return FALSE (no raise)
+#   - else → send_logs(endpoint, resource, list(log), scope, timeout)
 log_send <- function(
   log,
   endpoint = NULL,
@@ -1597,7 +1776,21 @@ log_send <- function(
   scope    = NULL,
   timeout  = 2
 ) {
-  stop("TODO(WP6): log_send")
+  endpoint_from_env <- is.null(endpoint)
+  if (endpoint_from_env) {
+    ep_check <- .picotel_endpoint("logs")
+  } else {
+    ep_check <- endpoint
+  }
+  if (is.null(resource)) {
+    resource <- .picotel_resource_from_env()
+  }
+  if (is.null(ep_check) || is.null(resource)) {
+    .picotel_log("log not sent, missing endpoint or resource")
+    return(FALSE)
+  }
+  send_ep <- if (endpoint_from_env) NULL else endpoint
+  send_logs(send_ep, resource, list(log), scope, timeout)
 }
 
 
@@ -1608,6 +1801,16 @@ log_send <- function(
 # send_spans(endpoint, resource, spans, scope, timeout) — send a batch of spans.
 # endpoint = NULL → resolve from env; raises picotel_config_error when
 # unconfigured.  Per-span validation: invalid spans are logged and dropped.
+#
+# Ports Python send_spans() exactly:
+#   1. .picotel_is_disabled() → return FALSE immediately (no logging).
+#   2. endpoint NULL → .picotel_endpoint("traces"); still NULL → raise
+#      picotel_config_error with the Python-matching message.
+#   3. Explicit endpoint → strip trailing "/" + append "/v1/traces".
+#   4. Per-span .picotel_validate_span() in tryCatch; on picotel_config_error
+#      log and drop that span, keep valid spans.
+#   5. Build ExportTraceServiceRequest payload.
+#   6. .picotel_to_json() + .picotel_post_json(); return its TRUE/FALSE.
 send_spans <- function(
   endpoint,
   resource,
@@ -1615,11 +1818,70 @@ send_spans <- function(
   scope   = NULL,
   timeout = 2
 ) {
-  stop("TODO(WP6): send_spans")
+  # Step 1: disabled check — return FALSE immediately, no logging.
+  if (.picotel_is_disabled()) return(FALSE)
+
+  # Step 2/3: URL resolution.
+  if (is.null(endpoint)) {
+    url <- .picotel_endpoint("traces")
+    if (is.null(url)) {
+      picotel_config_error(paste0(
+        "No OTLP endpoint configured.",
+        " Set ", .picotel_env("OTEL_EXPORTER_OTLP_ENDPOINT"),
+        " or ", .picotel_env("OTEL_SDK_DISABLED"), "=true."
+      ))
+    }
+  } else {
+    # Explicit endpoint: strip trailing slash(es) and append signal path.
+    url <- paste0(sub("/+$", "", endpoint), "/v1/traces")
+  }
+
+  # Step 4: per-span validation — log + drop invalid spans.
+  valid_spans <- list()
+  for (span in spans) {
+    tryCatch(
+      {
+        .picotel_validate_span(span)
+        valid_spans <- c(valid_spans, list(span))
+      },
+      picotel_config_error = function(e) {
+        .picotel_log(conditionMessage(e))
+      }
+    )
+  }
+
+  # Step 5: build ExportTraceServiceRequest payload.
+  span_dicts <- lapply(valid_spans, .picotel_span_to_list)
+
+  scope_span_dict <- list(spans = span_dicts)
+  if (!is.null(scope)) {
+    scope_dict <- list(name = scope$name, version = scope$version)
+    if (!is.null(scope$attributes) && length(scope$attributes) > 0L) {
+      scope_dict$attributes <- .picotel_attributes_to_otlp(scope$attributes)
+    }
+    scope_span_dict$scope <- scope_dict
+  }
+
+  payload <- list(
+    resourceSpans = list(
+      list(
+        resource   = list(attributes = .picotel_attributes_to_otlp(resource$attributes)),
+        scopeSpans = list(scope_span_dict)
+      )
+    )
+  )
+
+  # Step 6: encode and post.
+  body <- .picotel_to_json(payload)
+  .picotel_post_json(url, body, timeout, signal = "traces")
 }
 
 # send_logs(endpoint, resource, logs, scope, timeout) — send a batch of log
 # records.  Same endpoint/config semantics as send_spans.
+#
+# Ports Python send_logs() exactly (mirror of send_spans for the logs signal).
+# Unlike send_spans, there is no per-log validation step — Python send_logs()
+# does not validate individual log records before sending.
 send_logs <- function(
   endpoint,
   resource,
@@ -1627,7 +1889,48 @@ send_logs <- function(
   scope   = NULL,
   timeout = 2
 ) {
-  stop("TODO(WP6): send_logs")
+  # Step 1: disabled check — return FALSE immediately, no logging.
+  if (.picotel_is_disabled()) return(FALSE)
+
+  # Step 2/3: URL resolution.
+  if (is.null(endpoint)) {
+    url <- .picotel_endpoint("logs")
+    if (is.null(url)) {
+      picotel_config_error(paste0(
+        "No OTLP endpoint configured.",
+        " Set ", .picotel_env("OTEL_EXPORTER_OTLP_ENDPOINT"),
+        " or ", .picotel_env("OTEL_SDK_DISABLED"), "=true."
+      ))
+    }
+  } else {
+    # Explicit endpoint: strip trailing slash(es) and append signal path.
+    url <- paste0(sub("/+$", "", endpoint), "/v1/logs")
+  }
+
+  # Step 5: build ExportLogsServiceRequest payload.
+  log_dicts <- lapply(logs, .picotel_log_to_list)
+
+  scope_log_dict <- list(logRecords = log_dicts)
+  if (!is.null(scope)) {
+    scope_dict <- list(name = scope$name, version = scope$version)
+    if (!is.null(scope$attributes) && length(scope$attributes) > 0L) {
+      scope_dict$attributes <- .picotel_attributes_to_otlp(scope$attributes)
+    }
+    scope_log_dict$scope <- scope_dict
+  }
+
+  payload <- list(
+    resourceLogs = list(
+      list(
+        resource  = list(attributes = .picotel_attributes_to_otlp(resource$attributes)),
+        scopeLogs = list(scope_log_dict)
+      )
+    )
+  )
+
+  # Step 6: encode and post.
+  body <- .picotel_to_json(payload)
+  .picotel_post_json(url, body, timeout, signal = "logs")
 }
 
 
@@ -1655,5 +1958,153 @@ otlp_condition_handler <- function(
   resource   = NULL,
   attributes = NULL
 ) {
-  stop("TODO(WP6): otlp_condition_handler")
+  # Capture handler-level settings in the closure so they are re-evaluated
+  # lazily at handle time (for mutable state like resource).  The closure
+  # captures the *values* at construction time — matching Python's __init__
+  # which stores endpoint/resource/attributes as instance fields.
+  handler_endpoint   <- endpoint
+  handler_resource   <- resource
+  handler_attributes <- if (is.null(attributes)) list() else attributes
+
+  # Returns a handler function that can be used with:
+  #   globalCallingHandlers(message = h, warning = h)
+  #   withCallingHandlers(expr, message = h, warning = h)
+  #
+  # R calling handlers NEVER muffles/re-raises conditions; they just run
+  # side-effect code (sending the log record) and return.  The normal
+  # condition propagation continues after the handler returns.
+  function(cond) {
+    # Wrap everything in tryCatch so the handler NEVER throws. A handler that
+    # throws disrupts the condition system and can crash the application
+    # (Python's emit() similarly wraps in try/except: prints to stderr, no raise).
+    tryCatch({
+
+      # --- Disabled short-circuit ---
+      if (.picotel_is_disabled()) return(invisible(NULL))
+
+      # --- Severity mapping (documented deviation: R has no log levels) ---
+      # Python: DEBUG≤10→DEBUG, INFO≤20→INFO, WARNING≤30→WARN,
+      #         ERROR≤40→ERROR, CRITICAL>40→FATAL.
+      # R: conditions carry no numeric level; we map by class hierarchy:
+      #   "error"   → ERROR  (17)  [note: errors typically bypass message handlers
+      #                              unless explicitly signalled; include for robustness]
+      #   "warning" → WARN   (13)
+      #   "message" → INFO   (9)   [R message() adds a trailing newline]
+      # Precedence: check most-specific first (error before warning before message).
+      # Deviation documented: no DEBUG or FATAL mappings (R conditions don't carry
+      # numeric levels; numeric mapping is not possible without custom condition classes).
+      if (inherits(cond, "error")) {
+        severity_num  <- Severity$ERROR
+        severity_text <- "ERROR"
+      } else if (inherits(cond, "warning")) {
+        severity_num  <- Severity$WARN
+        severity_text <- "WARN"
+      } else {
+        # message or any other condition type
+        severity_num  <- Severity$INFO
+        severity_text <- "INFO"
+      }
+
+      # --- Message body ---
+      # Python: record.getMessage() — the interpolated log message.
+      # R: conditionMessage(cond) — may include trailing "\n" added by message().
+      # Strip that trailing newline so the body is clean.
+      body <- conditionMessage(cond)
+      body <- sub("\n$", "", body)
+
+      # --- Condition-supplied fields ---
+      # Python: handler.EXTRA_KEYS = ("trace_id", "span_id", "attributes")
+      # R conditions do not have .record.extra but calling code can attach
+      # named fields to the condition object.  We support:
+      #   cond$picotel.attributes — named list of extra attributes
+      #   cond$trace_id           — string trace ID
+      #   cond$span_id            — string span ID
+      # Deviation: Python also extracts code.filepath/code.lineno/code.function
+      # from the LogRecord; R cannot get caller source location cheaply
+      # (sys.call()/sys.frame() do not give file+line without source refs),
+      # so code.* attributes are NOT added here (documented deviation, mirrors
+      # Go's OmitSource=true default in tests).
+
+      cond_attrs    <- cond$picotel.attributes  # may be NULL
+      cond_trace_id <- cond$trace_id            # may be NULL
+      cond_span_id  <- cond$span_id             # may be NULL
+
+      # --- Attribute merging (Python order: handler-level first, record wins) ---
+      # Python: attributes = {**self.extra.get("attributes")}
+      #         attributes.update(self.extra.get("attributes") or {})
+      #         attributes.update(record_extra.get("attributes") or {})
+      # R: start with handler-level attributes, then overlay condition-supplied.
+      merged_attrs <- handler_attributes
+      if (!is.null(cond_attrs) && is.list(cond_attrs) && length(cond_attrs) > 0L) {
+        for (k in names(cond_attrs)) {
+          merged_attrs[[k]] <- cond_attrs[[k]]
+        }
+      }
+
+      # --- trace_id / span_id: record wins over handler-level defaults ---
+      # Python: merged = {**self.extra, **record_extra}
+      #         trace_id = merged.get("trace_id") or ""
+      #         span_id  = merged.get("span_id")  or ""
+      # R: handler-level defaults come from handler_* fields if present in
+      #    handler_attributes.  Condition-supplied values override if non-NULL.
+      # Deviation: Python handler has handler.extra dict; R handler captures
+      # trace_id/span_id directly in handler_attributes (the caller must pass
+      # list(trace_id="...", span_id="...") inside `attributes=` if they want
+      # handler-level defaults for trace correlation — not ideal but consistent
+      # with the R condition model where conditions carry custom fields, not a
+      # logging-framework "extra" dict).
+      trace_id <- cond_trace_id %||% handler_attributes[["trace_id"]] %||% ""
+      span_id  <- cond_span_id  %||% handler_attributes[["span_id"]]  %||% ""
+      # Normalise NULL to "".
+      if (is.null(trace_id)) trace_id <- ""
+      if (is.null(span_id))  span_id  <- ""
+
+      # Remove trace_id/span_id from attributes (they are LogRecord fields,
+      # not OTLP attributes — mirrors Python exactly).
+      merged_attrs[["trace_id"]] <- NULL
+      merged_attrs[["span_id"]]  <- NULL
+
+      # --- Timestamp ---
+      # Python: timestamp_ns = int(record.created * 1_000_000_000)
+      # R: use Sys.time() at handle time (no equivalent of record.created).
+      ts_ns <- now_ns()
+
+      # --- Build and submit log record ---
+      log <- picotel_log_record(
+        body            = body,
+        timestamp_ns    = ts_ns,
+        trace_id        = trace_id,
+        span_id         = span_id,
+        severity_number = severity_num,
+        severity_text   = severity_text,
+        attributes      = merged_attrs
+      )
+
+      # Endpoint/resource resolution (mirrors Python OTLPHandler.emit):
+      #   endpoint = self.endpoint or None
+      #   resource = self.resource or _get_resource_from_env()
+      #   if resource: _sender.submit(...)
+      # Silent drop when resource is still NULL (no endpoint without resource).
+      send_ep <- handler_endpoint
+      send_res <- handler_resource
+      if (is.null(send_res)) {
+        send_res <- .picotel_resource_from_env()
+      }
+      if (!is.null(send_res)) {
+        sender <- .picotel_get_sender()
+        sender(send_logs, send_ep, send_res, list(log), NULL)
+      }
+
+    }, error = function(e) {
+      # Handler must NEVER throw. Swallow and write minimally to stderr.
+      # Mirrors Python: sys.stderr.write("failed to send log\n")
+      cat("picotel: failed to send log\n", file = stderr())
+    })
+
+    invisible(NULL)
+  }
 }
+
+# .picotel_null_coalesce — helper for NULL coalescing used in the handler.
+# R does not have a built-in %||% operator.
+`%||%` <- function(a, b) if (!is.null(a)) a else b
