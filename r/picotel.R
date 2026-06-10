@@ -410,40 +410,416 @@ now_ns <- function() {
 
 # .picotel_to_otlp_value(value) — convert an R value to the typed OTLP
 # attribute map format (e.g. list(stringValue = "hello")).
-# R-specific: length-1 vector → scalar; length-n → arrayValue; NA → skip
-# (empty list); factor → string; integer/whole-number double → intValue
-# (serialized via .picotel_ns_str to avoid JSON precision loss).
+#
+# Type dispatch (mirrors Python _to_otlp_value(), with R-specific additions):
+#
+#   NULL              -> list()  (empty map; Python None -> {})
+#   NA (any type)     -> list()  (R-specific decision: NA is treated as missing/None.
+#                                  NA carries no useful telemetry value and would
+#                                  produce misleading strings.  Callers wanting a
+#                                  literal "NA" string must call as.character(NA).)
+#   logical (len 1)   -> boolValue   (checked before numeric)
+#   integer (len 1)   -> intValue    (sprintf "%.0f", no sci notation)
+#   whole-number double (len 1) -> intValue  (mirrors Python int path for 42.0)
+#   NaN               -> doubleValue "NaN"        (proto3 JSON; mirrors Go f1c4cfb)
+#   Inf               -> doubleValue "Infinity"   (proto3 JSON)
+#  -Inf               -> doubleValue "-Infinity"  (proto3 JSON)
+#   other double(len 1)-> doubleValue             (as numeric, full precision)
+#   character (len 1) -> stringValue
+#   factor (len 1)    -> stringValue via as.character
+#   named list        -> kvlistValue  (mirrors Python dict -> kvlistValue)
+#   length > 1 vector/list -> arrayValue  (R has no scalars; length-n is array)
+#   unnamed list      -> arrayValue
+#   other types       -> stringValue via as.character  (fallback; mirrors Python str())
+#
+# Empty container convention: bare list() -> "[]" in .picotel_to_json().
+# Named empty list is impossible (list() has no names); but if it occurs, it
+# also becomes an array.  Upstream serializers always omit empty containers
+# before calling to_json, so this edge case is benign.
 .picotel_to_otlp_value <- function(value) {
-  stop("TODO(WP3): .picotel_to_otlp_value")
+  # NULL -> empty OTLP value map (Python None -> {}).
+  # We return a named-but-empty list so the JSON encoder produces "{}".
+  # (An unnamed empty list would produce "[]" per the plan D1 convention.)
+  if (is.null(value)) {
+    return(.picotel_empty_otlp_map())
+  }
+
+  # NaN must be checked before is.na() because is.na(NaN) is TRUE.
+  # NaN is a valid double, not a missing value.
+  if (is.double(value) && length(value) == 1L && is.nan(value)) {
+    return(list(doubleValue = "NaN"))
+  }
+
+  # Scalar NA of any type -> empty OTLP value map (R-specific: NA treated as None).
+  # Must check before type dispatch so NA_real_, NA_integer_, NA_character_ are
+  # all caught.  is.na() on a list returns per-element; we guard with !is.list().
+  if (!is.list(value) && length(value) == 1L && is.na(value)) {
+    return(.picotel_empty_otlp_map())
+  }
+
+  # Named list -> kvlistValue  (check before length-n so a named list of length 1
+  # is NOT treated as a scalar but as an object with one key)
+  if (is.list(value) && !is.null(names(value))) {
+    return(.picotel_kvlist_value(value))
+  }
+
+  # length > 1 vector or unnamed list -> arrayValue
+  if (length(value) > 1L) {
+    return(.picotel_array_value(value))
+  }
+
+  # Unnamed list of length 0 or 1 -> arrayValue
+  if (is.list(value)) {
+    return(.picotel_array_value(value))
+  }
+
+  # From here on: length-1 atomic vector (scalar).
+
+  # factor -> stringValue  (before is.character since is.character(factor) is FALSE)
+  if (is.factor(value)) {
+    return(list(stringValue = as.character(value)))
+  }
+
+  # logical -> boolValue  (before numeric: logical is not numeric in R)
+  if (is.logical(value)) {
+    return(list(boolValue = as.logical(value)))
+  }
+
+  # integer -> intValue as exact decimal string
+  if (is.integer(value)) {
+    return(list(intValue = .picotel_ns_str(value)))
+  }
+
+  # double: Inf first (proto3 JSON strings), then whole-number doubles, then general.
+  # NaN was already handled before the is.na() check above.
+  if (is.double(value)) {
+    if (is.infinite(value)) {
+      return(list(doubleValue = if (value > 0) "Infinity" else "-Infinity"))
+    }
+    if (value == floor(value)) {
+      # Whole-number double -> intValue (mirrors Python's int path for e.g. 42.0).
+      # No upper-bound guard: large doubles like max-int64 are representable and
+      # must be emitted as intValue strings (plan D5, Go WP3).
+      return(list(intValue = .picotel_ns_str(value)))
+    }
+    # Non-whole double -> doubleValue; store as numeric for JSON encoder
+    return(list(doubleValue = value))
+  }
+
+  # character -> stringValue
+  if (is.character(value)) {
+    return(list(stringValue = value))
+  }
+
+  # Fallback: as.character() mirrors Python's str(value) for unknown types
+  list(stringValue = as.character(value))
+}
+
+# .picotel_empty_otlp_map() — return the R representation of an empty OTLP
+# value map (Python's {} / None -> {}).  Uses a named-but-empty list so that
+# the JSON encoder produces "{}" rather than "[]".
+# Internal helper; not exported.
+.picotel_empty_otlp_map <- function() {
+  setNames(list(), character(0L))
+}
+
+# .picotel_array_value(vec) — encode a vector or unnamed list as OTLP arrayValue.
+# Internal helper; not exported.
+.picotel_array_value <- function(vec) {
+  if (length(vec) == 0L) {
+    return(list(arrayValue = list(values = list())))
+  }
+  if (is.list(vec)) {
+    vals <- lapply(vec, .picotel_to_otlp_value)
+  } else {
+    vals <- lapply(seq_along(vec), function(i) .picotel_to_otlp_value(vec[[i]]))
+  }
+  list(arrayValue = list(values = vals))
+}
+
+# .picotel_kvlist_value(x) — encode a named list as OTLP kvlistValue.
+# Preserves insertion order (R named lists maintain order, unlike Go maps).
+# Internal helper; not exported.
+.picotel_kvlist_value <- function(x) {
+  nms <- names(x)
+  pairs <- lapply(seq_along(x), function(i) {
+    list(key = nms[[i]], value = .picotel_to_otlp_value(x[[i]]))
+  })
+  list(kvlistValue = list(values = pairs))
 }
 
 # .picotel_attributes_to_otlp(attributes) — convert a named list of attributes
-# to the OTLP [{key, value}] list format, skipping NULL/NA values.
+# to the OTLP [{key, value}] list format.
+#
+# Skips entries where the value is NULL (mirrors Python: `if v is not None`).
+# Skips entries where the value is a scalar NA (R-specific: NA treated as None).
+# NULL/empty attributes argument returns list() (empty result).
+#
+# NOTE: Unlike .picotel_to_otlp_value(), NA inside a nested array is NOT
+# skipped here — only top-level NULL/NA entries are omitted.  This mirrors
+# Python where None at the top level is skipped but None inside a list
+# becomes {} (an empty OTLP value).
 .picotel_attributes_to_otlp <- function(attributes) {
-  stop("TODO(WP3): .picotel_attributes_to_otlp")
+  if (is.null(attributes) || length(attributes) == 0L) {
+    return(list())
+  }
+  nms <- names(attributes)
+  result <- list()
+  for (i in seq_along(attributes)) {
+    v <- attributes[[i]]
+    # Skip NULL values (mirrors Python's `if v is not None`)
+    if (is.null(v)) next
+    # Skip scalar NA at the top level (R-specific: NA == missing/None)
+    if (!is.list(v) && length(v) == 1L && is.na(v)) next
+    result <- c(result, list(list(key = nms[[i]], value = .picotel_to_otlp_value(v))))
+  }
+  result
 }
 
-# .picotel_span_to_list(span) — serialize a picotel_span env to the OTLP dict.
+# .picotel_span_to_list(span) — serialize a picotel_span environment to the
+# OTLP JSON dict format.  Ports Python's _span_to_dict() field-by-field,
+# including conditional omission of optional fields.
+#
+# span: environment or list with fields:
+#   trace_id, span_id, name, kind, start_time_ns, end_time_ns,
+#   parent_span_id, attributes, events (list of lists: name/timestamp_ns/attributes),
+#   links (list of lists: trace_id/span_id/attributes), status
 .picotel_span_to_list <- function(span) {
-  stop("TODO(WP3): .picotel_span_to_list")
+  result <- list(
+    traceId           = span$trace_id,
+    spanId            = span$span_id,
+    name              = span$name,
+    kind              = as.integer(span$kind),
+    startTimeUnixNano = .picotel_ns_str(span$start_time_ns),
+    endTimeUnixNano   = .picotel_ns_str(span$end_time_ns)
+  )
+
+  # parentSpanId — omit when empty (mirrors Python: `if span.parent_span_id`)
+  if (!is.null(span$parent_span_id) && nchar(span$parent_span_id) > 0L) {
+    result$parentSpanId <- span$parent_span_id
+  }
+
+  # attributes — omit when empty
+  attrs <- .picotel_attributes_to_otlp(span$attributes)
+  if (length(attrs) > 0L) {
+    result$attributes <- attrs
+  }
+
+  # events — omit when empty
+  if (!is.null(span$events) && length(span$events) > 0L) {
+    result$events <- lapply(span$events, function(ev) {
+      e <- list(
+        name         = ev$name,
+        timeUnixNano = .picotel_ns_str(ev$timestamp_ns)
+      )
+      ev_attrs <- .picotel_attributes_to_otlp(ev$attributes)
+      if (length(ev_attrs) > 0L) {
+        e$attributes <- ev_attrs
+      }
+      e
+    })
+  }
+
+  # links — omit when empty
+  if (!is.null(span$links) && length(span$links) > 0L) {
+    result$links <- lapply(span$links, function(lk) {
+      l <- list(
+        traceId = lk$trace_id,
+        spanId  = lk$span_id
+      )
+      lk_attrs <- .picotel_attributes_to_otlp(lk$attributes)
+      if (length(lk_attrs) > 0L) {
+        l$attributes <- lk_attrs
+      }
+      l
+    })
+  }
+
+  # status — omit when NULL or UNSET (SpanStatus$UNSET == 0L)
+  # Mirrors Python: `if span.status is not None and span.status != Span.Status.UNSET`
+  if (!is.null(span$status) && !identical(as.integer(span$status), SpanStatus$UNSET)) {
+    result$status <- list(code = as.integer(span$status))
+  }
+
+  result
 }
 
-# .picotel_log_to_list(log) — serialize a picotel_log_record env to OTLP dict.
+# .picotel_log_to_list(log) — serialize a picotel_log_record environment to the
+# OTLP JSON dict format.  Ports Python's _log_to_dict() exactly, including
+# timestamp defaulting (0 -> now_ns()) and optional field omission.
+#
+# log: environment or list with fields:
+#   body, timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
+#   attributes, trace_id, span_id, trace_flags
 .picotel_log_to_list <- function(log) {
-  stop("TODO(WP3): .picotel_log_to_list")
+  # Use current time when timestamps are 0 (mirrors Python:
+  #   str(log.timestamp_ns if log.timestamp_ns else now_ns()))
+  ts  <- if (!is.null(log$timestamp_ns) && log$timestamp_ns != 0)
+           log$timestamp_ns
+         else
+           now_ns()
+  obs <- if (!is.null(log$observed_timestamp_ns) && log$observed_timestamp_ns != 0)
+           log$observed_timestamp_ns
+         else
+           now_ns()
+
+  result <- list(
+    timeUnixNano         = .picotel_ns_str(ts),
+    observedTimeUnixNano = .picotel_ns_str(obs),
+    severityNumber       = as.integer(log$severity_number),
+    body                 = .picotel_to_otlp_value(log$body)
+  )
+
+  # severityText — omit when empty
+  if (!is.null(log$severity_text) && nchar(log$severity_text) > 0L) {
+    result$severityText <- log$severity_text
+  }
+
+  # attributes — omit when empty
+  attrs <- .picotel_attributes_to_otlp(log$attributes)
+  if (length(attrs) > 0L) {
+    result$attributes <- attrs
+  }
+
+  # traceId — omit when empty
+  if (!is.null(log$trace_id) && nchar(log$trace_id) > 0L) {
+    result$traceId <- log$trace_id
+  }
+
+  # spanId — omit when empty
+  if (!is.null(log$span_id) && nchar(log$span_id) > 0L) {
+    result$spanId <- log$span_id
+  }
+
+  # flags — omit when zero  (mirrors Python: `if log.trace_flags`)
+  if (!is.null(log$trace_flags) && log$trace_flags != 0L) {
+    result$flags <- as.integer(log$trace_flags)
+  }
+
+  result
 }
 
 # .picotel_validate_span(span) — check required fields; raise picotel_config_error
-# if invalid.
+# if invalid.  Ports Python's Span._validate() with matching error messages.
+#
+# Sentinel for "not set": NULL (R) mirrors Python's None.
+# In R, 0 could be a legitimate epoch timestamp, so NULL is the correct
+# "not set" sentinel — matching picotel_span() constructor defaults.
 .picotel_validate_span <- function(span) {
-  stop("TODO(WP3): .picotel_validate_span")
+  if (is.null(span$trace_id) || nchar(span$trace_id) == 0L) {
+    picotel_config_error("Span invalid: trace_id is empty")
+  }
+  if (is.null(span$start_time_ns)) {
+    picotel_config_error("Span invalid: start_time_ns is not set")
+  }
+  if (is.null(span$end_time_ns)) {
+    picotel_config_error("Span invalid: end_time_ns is not set")
+  }
+  invisible(NULL)
 }
 
 # .picotel_to_json(x) — hand-rolled JSON encoder (plan D1: no jsonlite).
-# Handles the OTLP value space: strings (with escaping), booleans, integers,
-# doubles, arrays, nested lists.
+#
+# Handles the OTLP value space produced by .picotel_to_otlp_value() and the
+# span/log serializers:
+#   named list    -> JSON object  {"key": value, ...}
+#   unnamed list  -> JSON array   [value, ...]  (bare list() -> "[]")
+#   logical TRUE  -> "true";  FALSE -> "false"
+#   character     -> JSON string  (with full escaping)
+#   numeric (int / double) -> JSON number
+#   NULL          -> "null"
+#
+# Proto3 JSON special values (NaN/Infinity/-Infinity) arrive here as character
+# strings from .picotel_to_otlp_value() (e.g. "NaN", "Infinity").  They are
+# emitted as JSON strings: {"doubleValue": "NaN"} — matching the proto3 spec.
+#
+# Convention: bare list() -> "[]" (empty array).  Named empty list cannot occur
+# in practice (list() has no names), but would also produce "[]".  Upstream
+# serializers always omit empty containers before calling .picotel_to_json, so
+# the distinction between empty object and empty array is never load-bearing.
 .picotel_to_json <- function(x) {
-  stop("TODO(WP3): .picotel_to_json")
+  if (is.null(x)) {
+    return("null")
+  }
+
+  # Named list -> JSON object
+  if (is.list(x) && !is.null(names(x))) {
+    nms <- names(x)
+    parts <- character(length(x))
+    for (i in seq_along(x)) {
+      parts[[i]] <- paste0(
+        .picotel_json_string(nms[[i]]),
+        ":",
+        .picotel_to_json(x[[i]])
+      )
+    }
+    return(paste0("{", paste(parts, collapse = ","), "}"))
+  }
+
+  # Unnamed list (including bare list()) -> JSON array
+  if (is.list(x)) {
+    if (length(x) == 0L) return("[]")
+    elems <- vapply(x, .picotel_to_json, character(1L))
+    return(paste0("[", paste(elems, collapse = ","), "]"))
+  }
+
+  # logical -> true / false  (must come before numeric: is.numeric(TRUE) is FALSE in R)
+  if (is.logical(x) && length(x) == 1L) {
+    return(if (isTRUE(x)) "true" else "false")
+  }
+
+  # character scalar -> JSON string (with escaping)
+  if (is.character(x) && length(x) == 1L) {
+    return(.picotel_json_string(x))
+  }
+
+  # numeric scalar (integer or double)
+  if (is.numeric(x) && length(x) == 1L) {
+    if (is.nan(x))      return('"NaN"')
+    if (is.infinite(x)) return(if (x > 0) '"Infinity"' else '"-Infinity"')
+    if (is.integer(x) || (is.double(x) && x == floor(x) && abs(x) < 2^53)) {
+      # Whole number: emit without decimal point or scientific notation
+      return(sprintf("%.0f", x))
+    }
+    # Full-precision double (17 sig figs is enough to round-trip any IEEE 754 double)
+    return(sprintf("%.17g", x))
+  }
+
+  # Fallback: treat as string
+  .picotel_json_string(as.character(x))
+}
+
+# .picotel_json_string(s) — encode a single R string as a quoted, escaped JSON string.
+# Applies all escapes required by RFC 8259:
+#   \ -> \\     " -> \"     \b -> \b     \f -> \f
+#   \n -> \n    \r -> \r    \t -> \t
+#   remaining U+0000-U+001F control chars -> \u00XX
+# Internal helper; not exported.
+.picotel_json_string <- function(s) {
+  # Backslash must be replaced first (otherwise later substitutions
+  # would double-escape the backslashes we introduce).
+  # With fixed = TRUE, pattern "\" (one backslash as R string "\\") is correct.
+  s <- gsub("\\",  "\\\\", s, fixed = TRUE)   # \ -> \\
+  s <- gsub('"',   '\\"',  s, fixed = TRUE)   # " -> \"
+  s <- gsub("\b",  "\\b",  s, fixed = TRUE)   # backspace       U+0008
+  s <- gsub("\f",  "\\f",  s, fixed = TRUE)   # form feed       U+000C
+  s <- gsub("\n",  "\\n",  s, fixed = TRUE)   # newline         U+000A
+  s <- gsub("\r",  "\\r",  s, fixed = TRUE)   # carriage return U+000D
+  s <- gsub("\t",  "\\t",  s, fixed = TRUE)   # tab             U+0009
+
+  # Remaining control characters U+0000-U+001F -> \uXXXX.
+  # This handles U+0000-U+0007, U+000B (VT), U+000E-U+001F (i.e. those not
+  # already caught by the named-escape substitutions above).
+  chars      <- strsplit(s, "", fixed = TRUE)[[1L]]
+  codepoints <- utf8ToInt(paste(chars, collapse = ""))
+  # Rebuild, replacing any remaining raw control chars with \uXXXX sequences.
+  needs_escape <- codepoints <= 0x1FL
+  if (any(needs_escape)) {
+    chars[needs_escape] <- sprintf("\\u%04X", codepoints[needs_escape])
+    s <- paste(chars, collapse = "")
+  }
+
+  paste0('"', s, '"')
 }
 
 
