@@ -827,22 +827,233 @@ now_ns <- function() {
 
 
 # .picotel_parse_headers() — parse OTEL_EXPORTER_OTLP_HEADERS (key=val,key=val)
-# returning a named character vector.
+# returning a named character vector (possibly empty).
+#
+# Mirrors Python's _parse_headers() (@functools.lru_cache):
+#   - Reads the env var via .picotel_env() so PICOTEL_PREFIX remaps it.
+#   - Splits on "," then on "=" (first "=" only, so values may contain "=").
+#   - Trims whitespace from both key and value.
+#   - Skips pairs that do not contain "=".
+#   - Returns a named character vector (names = header keys, values = header
+#     values).  Empty character(0) vector when the var is unset or empty.
+#
+# NOTE: Python's implementation does NOT percent-decode header values (unlike
+# resource attributes, which follow the W3C Baggage spec).  Neither does this
+# port — values are used verbatim after whitespace trimming.
+#
+# Caching: mirroring Python's lru_cache, the result is stored in
+# .picotel_state$headers and cleared by .picotel_reset_state().
 .picotel_parse_headers <- function() {
-  stop("TODO(WP4): .picotel_parse_headers")
+  if (exists("headers", envir = .picotel_state, inherits = FALSE)) {
+    return(.picotel_state$headers)
+  }
+
+  headers_str <- Sys.getenv(
+    .picotel_env("OTEL_EXPORTER_OTLP_HEADERS"), unset = ""
+  )
+
+  result <- if (nchar(headers_str) == 0L) {
+    character(0L)
+  } else {
+    pairs  <- strsplit(headers_str, ",", fixed = TRUE)[[1L]]
+    keys   <- character(0L)
+    values <- character(0L)
+    for (pair in pairs) {
+      pair   <- trimws(pair)
+      eq_pos <- regexpr("=", pair, fixed = TRUE)[[1L]]
+      if (eq_pos < 1L) next
+      k    <- trimws(substring(pair, 1L, eq_pos - 1L))
+      v    <- trimws(substring(pair, eq_pos + 1L))
+      keys   <- c(keys,   k)
+      values <- c(values, v)
+    }
+    if (length(keys) == 0L) character(0L) else setNames(values, keys)
+  }
+
+  .picotel_state$headers <- result
+  result
 }
 
 # .picotel_tls_options(signal) — return a named list of curl handle options
 # for TLS (plan D8: pure function, no side effects on handles).
-# CA precedence: signal-specific > general; INSECURE_SKIP_VERIFY never remapped.
+#
+# Mirrors Python's _ssl_context() precedence exactly:
+#
+#   1. PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY (read RAW, never remapped)
+#      Truthy = "true" / "True" / "TRUE" / "1" → ssl_verifypeer=0L,
+#      ssl_verifyhost=0L, but any configured client cert is STILL loaded.
+#      Short-circuits CA lookup entirely.
+#
+#   2. CA: signal-specific OTEL_EXPORTER_OTLP_{SIGNAL}_CERTIFICATE wins over
+#      OTEL_EXPORTER_OTLP_CERTIFICATE (both prefix-remapped via .picotel_env).
+#      → curl `cainfo` option (path to PEM file).
+#
+#   3. mTLS: OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE (+ optional CLIENT_KEY;
+#      combined cert+key PEM works with just the cert var, yielding sslkey=NULL
+#      which is omitted from the options list).  Signal-agnostic by design
+#      (documented deviation — no _TRACES_/_LOGS_ variants, same as Python).
+#      Client key without client cert is IGNORED.
+#
+#   4. Nothing configured → empty list (system trust store / no TLS override).
+#
+# Scheme gate: this function is scheme-agnostic (pure).  .picotel_post_json
+# applies TLS options ONLY for https:// URLs, matching Python's:
+#   "context = _ssl_context(signal) if scheme == 'https' else None"
+# Keeping the gate in the send path means bad cert paths never break http://.
+#
+# curl option names used (curl package spellings):
+#   cainfo         — path to CA bundle PEM file
+#   sslcert        — path to client certificate PEM
+#   sslkey         — path to client private key PEM (omitted when NULL)
+#   ssl_verifypeer — 0L = skip peer certificate check  (default: on)
+#   ssl_verifyhost — 0L = skip hostname check          (default: 2L = verify)
+#
+# Caching: mirroring Python's lru_cache, the result is stored in
+# .picotel_state under key "tls_<signal>" and cleared by .picotel_reset_state().
 .picotel_tls_options <- function(signal = "traces") {
-  stop("TODO(WP4): .picotel_tls_options")
+  cache_key <- paste0("tls_", signal)
+  if (exists(cache_key, envir = .picotel_state, inherits = FALSE)) {
+    return(.picotel_state[[cache_key]])
+  }
+
+  # --- mTLS client cert (signal-agnostic) ---
+  client_cert <- Sys.getenv(
+    .picotel_env("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE"), unset = ""
+  )
+  client_key  <- Sys.getenv(
+    .picotel_env("OTEL_EXPORTER_OTLP_CLIENT_KEY"), unset = ""
+  )
+  client_cert <- if (nchar(client_cert) > 0L) client_cert else NULL
+  client_key  <- if (nchar(client_key)  > 0L) client_key  else NULL
+
+  # Helper: append client cert options to an existing option list.
+  # Key-without-cert is ignored (matches Python: `if client_cert:` guard).
+  .with_client_cert <- function(opts) {
+    if (!is.null(client_cert)) {
+      opts$sslcert <- client_cert
+      if (!is.null(client_key)) opts$sslkey <- client_key
+    }
+    opts
+  }
+
+  # --- Skip-verify (raw PICOTEL_ name — never prefix-remapped) ---
+  skip_raw <- Sys.getenv("PICOTEL_EXPORTER_OTLP_INSECURE_SKIP_VERIFY", unset = "")
+  if (tolower(skip_raw) %in% c("true", "1")) {
+    opts <- list(ssl_verifypeer = 0L, ssl_verifyhost = 0L)
+    opts <- .with_client_cert(opts)
+    .picotel_state[[cache_key]] <- opts
+    return(opts)
+  }
+
+  # --- CA certificate (signal-specific wins over general) ---
+  signal_cert_var <- .picotel_env(
+    paste0("OTEL_EXPORTER_OTLP_", toupper(signal), "_CERTIFICATE")
+  )
+  cafile <- Sys.getenv(signal_cert_var, unset = "")
+  if (nchar(cafile) == 0L) {
+    cafile <- Sys.getenv(
+      .picotel_env("OTEL_EXPORTER_OTLP_CERTIFICATE"), unset = ""
+    )
+  }
+  cafile <- if (nchar(cafile) > 0L) cafile else NULL
+
+  if (!is.null(cafile)) {
+    opts <- list(cainfo = cafile)
+    opts <- .with_client_cert(opts)
+    .picotel_state[[cache_key]] <- opts
+    return(opts)
+  }
+
+  # --- Client cert only (system trust store for server verification) ---
+  if (!is.null(client_cert)) {
+    opts <- .with_client_cert(list())
+    .picotel_state[[cache_key]] <- opts
+    return(opts)
+  }
+
+  # Nothing configured → empty list (system defaults)
+  .picotel_state[[cache_key]] <- list()
+  list()
 }
 
 # .picotel_post_json(url, body, timeout, signal) — POST a JSON string to url
-# using curl, applying TLS options for the given signal.
+# using the curl package, applying TLS options for the given signal.
+#
+# Parameters:
+#   url     — fully-qualified HTTP(S) URL (character scalar)
+#   body    — JSON string to POST (character scalar)
+#   timeout — request timeout in SECONDS (numeric); curl `timeout` option
+#   signal  — OTLP signal type for TLS CA selection: "traces" or "logs"
+#
+# Returns TRUE on HTTP 200, FALSE on any error or non-200 status.
+# NEVER raises — telemetry errors must not crash the application.
+#
+# Scheme gate: TLS options are applied ONLY for https:// URLs.  A bad cert
+# path in OTEL_EXPORTER_OTLP_CERTIFICATE must not break plain http:// sends.
+# This mirrors Python's scheme check in send_spans/send_logs:
+#   context = _ssl_context(signal) if scheme == "https" else None
+#
+# curl timeout option: uses `timeout` (seconds) not `timeout_ms` (milliseconds).
+# With timeout < 1s round up to 1s (curl `timeout` is integer seconds).
 .picotel_post_json <- function(url, body, timeout = 2, signal = "traces") {
-  stop("TODO(WP4): .picotel_post_json")
+  # Lazy-load curl — informative error if unavailable; return FALSE (no raise).
+  if (!requireNamespace("curl", quietly = TRUE)) {
+    .picotel_log(
+      "curl package is required for HTTP sending but is not installed."
+    )
+    return(FALSE)
+  }
+
+  # Build HTTP header vector: Content-Type always present; env headers appended.
+  env_headers  <- .picotel_parse_headers()
+  http_headers <- "Content-Type: application/json"
+  if (length(env_headers) > 0L) {
+    http_headers <- c(
+      http_headers,
+      paste0(names(env_headers), ": ", unname(env_headers))
+    )
+  }
+
+  # Fresh handle per request (plan hazard: TLS options vary per signal/call).
+  h <- curl::new_handle()
+  curl::handle_setopt(
+    h,
+    customrequest = "POST",
+    postfields     = body,
+    httpheader     = http_headers,
+    timeout        = as.integer(max(1L, round(timeout)))
+  )
+
+  # Scheme gate: apply TLS options only for https:// endpoints.
+  scheme <- tolower(sub("^([a-zA-Z][a-zA-Z0-9+.-]*)://.*$", "\\1", url))
+  if (identical(scheme, "https")) {
+    tls_opts <- .picotel_tls_options(signal)
+    if (length(tls_opts) > 0L) {
+      curl::handle_setopt(h, .list = tls_opts)
+    }
+  }
+
+  # Execute the request; catch all errors (network failure, TLS error, etc.).
+  result <- tryCatch(
+    curl::curl_fetch_memory(url, handle = h),
+    error = function(e) {
+      .picotel_log(paste0(
+        "Failed to send ", signal, " to ", url, ": ", conditionMessage(e)
+      ))
+      NULL
+    }
+  )
+
+  if (is.null(result)) return(FALSE)
+
+  # OTLP spec: only HTTP 200 is a successful export (matches Python exactly).
+  if (result$status_code == 200L) return(TRUE)
+
+  .picotel_log(paste0(
+    "Failed to send ", signal, " to ", url,
+    ": HTTP ", result$status_code
+  ))
+  FALSE
 }
 
 
