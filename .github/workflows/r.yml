@@ -1,0 +1,38 @@
+name: R Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'r/**'
+      - '.github/workflows/r.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'r/**'
+      - '.github/workflows/r.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        r-version: ['release', 'oldrel-1']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up R ${{ matrix.r-version }}
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.r-version }}
+
+      - name: Install test dependencies
+        run: |
+          Rscript -e 'install.packages(
+            c("testthat", "withr", "webfakes", "curl"),
+            repos = "https://cloud.r-project.org"
+          )'
+
+      - name: Run tests
+        run: Rscript r/tests/run.R
