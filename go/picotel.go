@@ -3,8 +3,43 @@
 // OTLP-compatible collector (Jaeger, Grafana Tempo, OTEL Collector, etc.)
 // with no external dependencies — ideal for vendoring alongside software
 // that needs basic observability without pulling in the full OpenTelemetry SDK.
+// This package ports picotel Python v0.3.0 behavior and requires Go 1.21 or later.
 //
-// This package ports picotel Python v0.3.0 behavior.
+// # Basic usage
+//
+//	traceID := picotel.NewTraceID()
+//	resource := picotel.NewResource(map[string]any{"service.name": "my-app"})
+//
+//	span := picotel.NewSpan(traceID, "do-work").Start()
+//	span.Endpoint = "http://localhost:4318"
+//	span.Resource = resource
+//	defer span.End()
+//
+//	span.Attributes["key"] = "value"
+//
+// Logs are exported via the standard slog package:
+//
+//	logger := slog.New(picotel.NewOTLPHandler(&picotel.OTLPHandlerOptions{
+//	    Endpoint: "http://localhost:4318",
+//	    Resource: resource,
+//	}))
+//	logger.Info("hello", slog.String("trace_id", traceID))
+//
+// # Configuration
+//
+// All configuration is read from environment variables at first use.
+// The standard OTEL_* variables are supported; see go/README.md for the full
+// table. Set OTEL_SDK_DISABLED=true to silence all telemetry without changing
+// code. Set PICOTEL_ASYNC=true to dispatch telemetry on a background goroutine
+// (call Flush before process exit to drain the queue).
+//
+// # Vendoring
+//
+// Copy picotel.go directly into your project — it has no imports outside the
+// Go standard library. You may rewrite the "package picotel" declaration to
+// match your own package name.
+//
+// Go module releases use subdirectory tags (go/v1.0.0, go/v1.1.0, …).
 package picotel
 
 import (
