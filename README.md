@@ -6,6 +6,13 @@ Designed for:
 - **Vendoring** in contexts where installing external dependencies is not possible or desirable (embedded scripts, restricted environments, standalone tools)
 - **Isolation** when you need to submit OTLP signals without conflicting with the OpenTelemetry SDK used by other parts of the application
 
+## Languages
+
+This repository is a monorepo of picotel implementations:
+
+- **Python** (`src/picotel.py`) — the original; documented in this README
+- **Go** (`go/`) — zero-dependency port targeting Go ≥ 1.21; see [go/README.md](go/README.md)
+
 ## Installation
 
 Just copy the single `picotel.py` file into your project:
