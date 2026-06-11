@@ -14,6 +14,25 @@
 # Test-only dependencies (never loaded by picotel.R itself):
 #   testthat, withr, webfakes
 #
+# Quickstart:
+#   source("picotel.R")
+#   resource <- picotel_resource(list("service.name" = "my-app"))
+#   with_span(
+#     trace_id = new_trace_id(),
+#     name     = "process-order",
+#     endpoint = "http://localhost:4318",
+#     resource = resource,
+#     f = function(span) {
+#       span$attributes[["order.id"]] <- "12345"
+#     }
+#   )
+#
+# Configuration is also possible entirely via environment variables
+# (OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_SERVICE_NAME, ...; remappable via
+# PICOTEL_PREFIX).  Set OTEL_SDK_DISABLED=true to silently drop all
+# telemetry.  Set PICOTEL_ASYNC=true for deferred sending drained by
+# picotel_flush().  See r/README.md for the full reference.
+#
 # Version: port of picotel Python v0.3.0
 # Author: Posit Software, PBC
 # URL: https://github.com/posit-dev/picotel
