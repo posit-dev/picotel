@@ -26,13 +26,18 @@ jobs:
         uses: r-lib/actions/setup-r@v2
         with:
           r-version: ${{ matrix.r-version }}
+          use-public-rspm: true
 
       - name: Install test dependencies
+        # use-public-rspm provides Linux binaries, so no source compilation.
+        # install.packages() only warns on failure; verify and fail hard.
         run: |
-          Rscript -e 'install.packages(
-            c("testthat", "withr", "webfakes", "curl"),
-            repos = "https://cloud.r-project.org"
-          )'
+          Rscript -e '
+            pkgs <- c("testthat", "withr", "webfakes", "curl")
+            install.packages(pkgs)
+            missing <- setdiff(pkgs, rownames(installed.packages()))
+            if (length(missing)) stop("failed to install: ", paste(missing, collapse = ", "))
+          '
 
       - name: Run tests
         run: Rscript r/tests/run.R
